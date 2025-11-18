@@ -52,37 +52,33 @@ class ClientOnboardingService:
     def onboarding_setup(
         onboarding_data: SignupwithOnboarding,
     ) -> GenericResponseModel:
-        """
-        Creates initial onboarding setup for a client based on client_id.
-        This function is called during the signup process to initialize the onboarding flow.
-        """
         try:
-
             db = get_db_session()
 
             logger.info(
-                msg="Payload with onboarding setup: {}".format(str(onboarding_data)),
+                msg="Payload with onboarding setup: {}".format(
+                    onboarding_data.model_dump()
+                ),
             )
 
             user_id = onboarding_data.onboarding_user_id
             client_id = onboarding_data.client_id
 
-            # Check if onboarding details already exist for this client
-            existing_onboarding_details = (
+            # Check if onboarding already exists
+            existing = (
                 db.query(Client_Onboarding_Details)
                 .filter_by(onboarding_user_id=user_id)
                 .first()
             )
 
-            if existing_onboarding_details is None:
-                # Create new onboarding details for the client
+            if existing is None:
 
                 new_client_onboarding = Client_Onboarding_Details(
                     client_id=client_id,
-                    onboarding_user_id=user_id,  # Keep user_id for tracking who initiated
-                    company_name=onboarding_data["company_name"],
-                    phone_number=onboarding_data["phone_number"],
-                    email=onboarding_data["email"],
+                    onboarding_user_id=user_id,
+                    company_name=onboarding_data.company_name,
+                    phone_number=onboarding_data.phone_number,
+                    email=onboarding_data.email,
                     is_stepper=2,
                 )
 
@@ -106,21 +102,9 @@ class ClientOnboardingService:
                 message="Onboarding setup completed successfully",
             )
 
-        except DatabaseError as e:
-            user_data = context_user_data.get()
-            logger.error(
-                extra=user_data.model_dump() if user_data else {},
-                msg="Database error during onboarding setup: {}".format(str(e)),
-            )
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while setting up onboarding.",
-            )
         except Exception as e:
-            user_data = context_user_data.get()
             logger.error(
-                extra=user_data.model_dump() if user_data else {},
-                msg="Unexpected error during onboarding setup: {}".format(str(e)),
+                msg=f"Unexpected error during onboarding setup: {e}",
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -148,15 +132,15 @@ class ClientOnboardingService:
                     )
 
                 # 1. Check OTP expired
-                if (
-                    existing.otp_expires_at
-                    and existing.otp_expires_at < datetime.utcnow()
-                ):
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.GONE,
-                        status=False,
-                        message="OTP expired. Please request a new OTP.",
-                    )
+                # if (
+                #     existing.otp_expires_at
+                #     and existing.otp_expires_at < datetime.utcnow()
+                # ):
+                #     return GenericResponseModel(
+                #         status_code=http.HTTPStatus.GONE,
+                #         status=False,
+                #         message="OTP expired. Please request a new OTP.",
+                #     )
 
                 # 2. Check correct OTP
                 if str(existing.is_otp) != str(otpVerified.otp):
@@ -277,13 +261,15 @@ class ClientOnboardingService:
                 )
 
                 if not onboarding_details:
+                    pass
+                    # print(">>>>>", jsonable_encoder(onboarding_form))
                     # Create new onboarding if doesn't exist
-                    onboarding_details = Client_Onboarding_Details(
-                        client_id=client_id,
-                        user_id=context_user_data.get().id,  # Track who initiated
-                        is_stepper=onboarding_form.stepper,
-                    )
-                    db.add(onboarding_details)
+                    # onboarding_details = Client_Onboarding_Details(
+                    #     client_id=client_id,
+                    #     # user_id=context_user_data.get().id,  # Track who initiated
+                    #     is_stepper=onboarding_form.stepper,
+                    # )
+                    # db.add(onboarding_details)
                 else:
                     # Check if form access is allowed after final submission
                     if not onboarding_details.is_form_access:
@@ -681,16 +667,12 @@ class ClientOnboardingService:
                         message="No onboarding data found for this client",
                         data={},
                     )
-                print("welcome to trigger stepper section Start")
-                print(jsonable_encoder(existing_onboarding), "<<existing_onboarding>>")
                 # Base data
                 data = {
                     "is_company_details": existing_onboarding.is_company_details,
                     "is_review": existing_onboarding.is_review,
                     "is_form_access": existing_onboarding.is_form_access,
                 }
-                print("welcome to trigger stepper section End")
-
                 # Stepper-specific data
                 if stepper == "2":
                     data["companyDetails"] = {

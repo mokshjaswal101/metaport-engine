@@ -13,6 +13,10 @@ from context_manager.context import context_user_data, get_db_session
 from modules.user.user_service import UserService
 from modules.client.client_onboarding_service import ClientOnboardingService
 
+from modules.client.client_schema import (
+    SignupwithOnboarding,
+)
+
 # models
 from models import (
     User,
@@ -266,17 +270,20 @@ class AuthService:
                 hold_amount=0.0,
             )
             db.add(wallet)
-
+            print("ready to startv onboarding concept start")
             # Create onboarding entry
-            ClientOnboardingService.onboarding_setup(
-                {
-                    "company_name": client_name,
-                    "phone_number": user_dict["phone"],
-                    "email": user_dict["email"],
-                    "client_id": created_client.id,
-                    "onboarding_user_id": user_dict["id"],
-                }
+            print(type(user_dict))
+            print(jsonable_encoder(user_dict))
+
+            onboarding_payload = SignupwithOnboarding(
+                company_name=client_name,
+                phone_number=user_dict["phone"],
+                email=user_dict["email"],
+                client_id=created_client.id,
+                onboarding_user_id=user_dict["id"],
             )
+            ClientOnboardingService.onboarding_setup(onboarding_payload)
+            print("ready to startv onboarding concept end")
 
             logger.info(
                 msg=f"User registration completed successfully for: {user_email}",
