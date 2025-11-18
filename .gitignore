@@ -1,0 +1,10 @@
+*.pyc
+*~
+*.swp
+.env
+
+venv
+
+# Log files
+*.log
+logger/log.log

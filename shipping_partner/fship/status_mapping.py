@@ -1,0 +1,22 @@
+status_mapping = {
+    "New": {"status": "new", "sub_status": "new"},
+    "": {"status": "new", "sub_status": "new"},
+    "BOOKED": {"status": "booked", "sub_status": "shipment booked"},
+    "MANIFESTED": {"status": "pickup", "sub_status": "manifested"},
+    "CANCELLED": {"status": "cancelled", "sub_status": "cancelled"},
+    "PICKUP_PENDING": {"status": "pickup", "sub_status": "pickup pending"},
+    "PICKED_UP": {"status": "in transit", "sub_status": "picked up"},
+    "IN_TRANSIT": {"status": "in transit", "sub_status": "in transit"},
+    "OUT_FOR_DELIVERY": {
+        "status": "out for delivery",
+        "sub_status": "out for delivery",
+    },
+    "DELIVERED": {"status": "delivered", "sub_status": "delivered"},
+    "NDR": {"status": "NDR", "sub_status": "NDR"},
+    "RETURN_TO_ORIGIN": {"status": "RTO", "sub_status": "RTO initiated"},
+    "RTO_DELIVERED": {"status": "RTO", "sub_status": "RTO delivered"},
+    "RTO_IN_TRANSIT": {"status": "RTO", "sub_status": "RTO in transit"},
+    "LOST": {"status": "lost", "sub_status": "lost"},
+    "DAMAGED": {"status": "damaged", "sub_status": "damaged"},
+    "": {"status": "cancelled", "sub_status": "cancelled"},
+}

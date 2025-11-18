@@ -1,0 +1,20 @@
+status_mapping = {
+    "Cancelled": {"status": "cancelled", "sub_status": "cancelled"},
+    "Pickup Pending": {"status": "pickup", "sub_status": "pickup pending"},
+    "Pickup Completed": {"status": "in transit", "sub_status": "in transit"},
+    "In-Transit": {"status": "in transit", "sub_status": "in transit"},
+    "At Delivery Center": {"status": "in transit", "sub_status": "in transit"},
+    "Out For Delivery": {
+        "status": "out for delivery",
+        "sub_status": "out for delivery",
+    },
+    "Delivered": {"status": "delivered", "sub_status": "delivered"},
+    "SHIPMENT DELIVERED": {"status": "delivered", "sub_status": "delivered"},
+    "Delivered to consignee": {"status": "delivered", "sub_status": "delivered"},
+    "Undelivered": {"status": "NDR", "sub_status": "NDR"},
+    "RTO": {"status": "RTO", "sub_status": "RTO Pending"},
+    "Return To Origin": {"status": "RTO", "sub_status": "RTO in transit"},
+    "RTO Delivered": {"status": "RTO", "sub_status": "RTO delivered"},
+    "RTO_IN_TRANSIT": {"status": "RTO", "sub_status": "RTO in transit"},
+    "Lost": {"status": "lost", "sub_status": "lost"},
+}
