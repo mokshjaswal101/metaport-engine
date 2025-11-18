@@ -143,7 +143,10 @@ class ClientOnboardingService:
                 #     )
 
                 # 2. Check correct OTP
-                if str(existing.is_otp) != str(otpVerified.otp):
+                if (
+                    str(existing.is_otp).strip() != str(otpVerified.otp).strip()
+                    or existing.is_otp_verified
+                ):
                     return GenericResponseModel(
                         status_code=http.HTTPStatus.BAD_REQUEST,
                         status=False,
@@ -152,7 +155,7 @@ class ClientOnboardingService:
 
                 # 3. Mark verified
                 existing.is_otp_verified = True
-                existing.is_otp = ""
+                # existing.is_otp = ""
                 db.commit()
 
                 return GenericResponseModel(
@@ -259,40 +262,23 @@ class ClientOnboardingService:
                     .filter_by(client_id=client_id)
                     .first()
                 )
-
-                if not onboarding_details:
-                    pass
-                    # print(">>>>>", jsonable_encoder(onboarding_form))
-                    # Create new onboarding if doesn't exist
-                    # onboarding_details = Client_Onboarding_Details(
-                    #     client_id=client_id,
-                    #     # user_id=context_user_data.get().id,  # Track who initiated
-                    #     is_stepper=onboarding_form.stepper,
-                    # )
-                    # db.add(onboarding_details)
-                else:
-                    # Check if form access is allowed after final submission
-                    if not onboarding_details.is_form_access:
-                        user_data = context_user_data.get()
-                        logger.warning(
-                            extra=user_data.model_dump() if user_data else {},
-                            msg=f"Form edit attempted for client_id: {client_id} but form access is disabled",
-                        )
-                        return GenericResponseModel(
-                            status_code=http.HTTPStatus.FORBIDDEN,
-                            status=False,
-                            message="Form editing is not allowed while verfication is in progress",
-                        )
+                if not onboarding_details.is_form_access:
+                    user_data = context_user_data.get()
+                    logger.warning(
+                        extra=user_data.model_dump() if user_data else {},
+                        msg=f"Form edit attempted for client_id: {client_id} but form access is disabled",
+                    )
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.FORBIDDEN,
+                        status=False,
+                        message="Form editing is not allowed while verfication is in progress",
+                    )
 
                 # Handle different stepper stages
                 if onboarding_form.stepper == 2:
                     ClientOnboardingService._handle_stepper_2(
                         onboarding_details, onboarding_form
                     )
-                # elif onboarding_form.stepper == 3:
-                #     ClientOnboardingService._handle_stepper_3(
-                #         onboarding_details, onboarding_form, db
-                #     )
                 elif onboarding_form.stepper == 3:
                     ClientOnboardingService._handle_stepper_3(onboarding_details)
                 elif onboarding_form.stepper == 4:
@@ -436,6 +422,7 @@ class ClientOnboardingService:
 
         onboarding_details.is_term = True
         onboarding_details.is_stepper = 3
+        # if onboarding_details.is_otp is None:
         # --- Generate and Save OTP ---
         otp = str(random.randint(100000, 999999))  # Always 6 digits
         onboarding_details.is_otp = otp  # Save OTP in DB
