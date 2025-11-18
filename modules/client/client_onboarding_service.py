@@ -64,8 +64,8 @@ class ClientOnboardingService:
                 msg="Payload with onboarding setup: {}".format(str(onboarding_data)),
             )
 
-            user_id = onboarding_data["onboarding_user_id"]
-            client_id = onboarding_data["client_id"]
+            user_id = onboarding_data.onboarding_user_id
+            client_id = onboarding_data.client_id
 
             # Check if onboarding details already exist for this client
             existing_onboarding_details = (
@@ -107,8 +107,9 @@ class ClientOnboardingService:
             )
 
         except DatabaseError as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Database error during onboarding setup: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -116,8 +117,9 @@ class ClientOnboardingService:
                 message="An error occurred while setting up onboarding.",
             )
         except Exception as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Unexpected error during onboarding setup: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -176,8 +178,9 @@ class ClientOnboardingService:
                 )
 
         except DatabaseError as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Database error during OTP verification: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -186,8 +189,9 @@ class ClientOnboardingService:
             )
 
         except Exception as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Unexpected error during OTP verification: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -209,8 +213,9 @@ class ClientOnboardingService:
                     .filter_by(client_id=client_id)
                     .first()
                 )
+                user_data = context_user_data.get()
                 logger.info(
-                    extra=context_user_data.get(),
+                    extra=user_data.model_dump() if user_data else {},
                     msg="Processing onboarding stepper 4",
                 )
                 # --- Generate and Save OTP ---
@@ -226,8 +231,9 @@ class ClientOnboardingService:
                     message="OTP verified successfully.",
                 )
         except DatabaseError as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Database error during OTP verification: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -236,8 +242,9 @@ class ClientOnboardingService:
             )
 
         except Exception as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Unexpected error during onboarding creation: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -252,8 +259,9 @@ class ClientOnboardingService:
         try:
             print("welcome to  onboarding create**")
             with get_db_session() as db:
+                user_data = context_user_data.get()
                 logger.info(
-                    extra=context_user_data.get(),
+                    extra=user_data.model_dump() if user_data else {},
                     msg="Payload onboarding_create: {}".format(str(onboarding_form)),
                 )
                 print(onboarding_form.stepper, "|*|<stepper>|*|")
@@ -279,8 +287,9 @@ class ClientOnboardingService:
                 else:
                     # Check if form access is allowed after final submission
                     if not onboarding_details.is_form_access:
+                        user_data = context_user_data.get()
                         logger.warning(
-                            extra=context_user_data.get(),
+                            extra=user_data.model_dump() if user_data else {},
                             msg=f"Form edit attempted for client_id: {client_id} but form access is disabled",
                         )
                         return GenericResponseModel(
@@ -321,8 +330,9 @@ class ClientOnboardingService:
                 )
 
         except DatabaseError as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Database error during onboarding creation: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -330,8 +340,9 @@ class ClientOnboardingService:
                 message="An error occurred while processing onboarding.",
             )
         except Exception as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Unexpected error during onboarding creation: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -342,8 +353,9 @@ class ClientOnboardingService:
     @staticmethod
     def _handle_stepper_2(onboarding_details, onboarding_form):
         """Handle stepper 2: Company details"""
+        user_data = context_user_data.get()
         logger.info(
-            extra=context_user_data.get(),
+            extra=user_data.model_dump() if user_data else {},
             msg="Processing onboarding stepper 2",
         )
 
@@ -430,8 +442,9 @@ class ClientOnboardingService:
     @staticmethod
     def _handle_stepper_3(onboarding_details):
         """Handle stepper 3: Terms and review"""
+        user_data = context_user_data.get()
         logger.info(
-            extra=context_user_data.get(),
+            extra=user_data.model_dump() if user_data else {},
             msg="Processing onboarding stepper 4",
         )
 
@@ -447,8 +460,9 @@ class ClientOnboardingService:
     @staticmethod
     def _handle_stepper_4(onboarding_details):
         """Handle stepper 4: Final submission"""
+        user_data = context_user_data.get()
         logger.info(
-            extra=context_user_data.get(),
+            extra=user_data.model_dump() if user_data else {},
             msg="Processing onboarding stepper 4 - Final submission",
         )
 
@@ -461,14 +475,16 @@ class ClientOnboardingService:
             onboarding_details.is_form_access = False
             onboarding_details.is_stepper = 4
 
+            user_data = context_user_data.get()
             logger.info(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg=f"Final onboarding submission completed for client: {onboarding_details.client_id}",
             )
             return final_result
         else:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Final submission failed",
             )
             return GenericResponseModel(
@@ -506,8 +522,9 @@ class ClientOnboardingService:
                 existing_onboarding_record.action_type = "new"
                 db.commit()
 
+                user_data = context_user_data.get()
                 logger.info(
-                    extra=context_user_data.get(),
+                    extra=user_data.model_dump() if user_data else {},
                     msg=f"Updated existing onboarding record for client_id: {client_id}",
                 )
                 return existing_onboarding_record.client_onboarding_details_id
@@ -523,8 +540,9 @@ class ClientOnboardingService:
                 db.add(new_onboarding_record)
                 db.commit()
 
+                user_data = context_user_data.get()
                 logger.info(
-                    extra=context_user_data.get(),
+                    extra=user_data.model_dump() if user_data else {},
                     msg=f"Created new onboarding record for client_id: {client_id}",
                 )
                 return new_onboarding_record.id
@@ -641,8 +659,9 @@ class ClientOnboardingService:
         """
         try:
             with get_db_session() as db:
+                user_data = context_user_data.get()
                 logger.info(
-                    extra=context_user_data.get(),
+                    extra=user_data.model_dump() if user_data else {},
                     msg="Retrieving onboarding data for stepper: {}".format(stepper),
                 )
 
@@ -736,8 +755,9 @@ class ClientOnboardingService:
                 )
 
         except DatabaseError as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Database error during get_onboarding: {}".format(str(e)),
             )
             return GenericResponseModel(
@@ -745,8 +765,9 @@ class ClientOnboardingService:
                 message="An error occurred while retrieving onboarding data.",
             )
         except Exception as e:
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Unexpected error during get_onboarding: {}".format(str(e)),
             )
             return GenericResponseModel(

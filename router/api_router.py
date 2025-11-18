@@ -87,5 +87,4 @@ CommonRouter.include_router(ndr_router)
 
 CommonRouter.include_router(courier_allocation_router)
 CommonRouter.include_router(billing_invoice_router)
-# CommonRouter.include_router(channel_router)
-#
+CommonRouter.include_router(channel_router)
