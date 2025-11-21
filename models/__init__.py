@@ -70,5 +70,6 @@ from .new_company_to_client_rate import New_Company_To_Client_Rate
 from .channel_master import ChannelMaster
 from .client_channel_integration import ClientChannelIntegration
 from .integration_sync_log import IntegrationSyncLog
+from .integration_audit_log import IntegrationAuditLog
 
 from .courier_billing import CourierBilling
