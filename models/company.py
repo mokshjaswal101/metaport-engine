@@ -1,5 +1,8 @@
 from sqlalchemy import Column, String
 from sqlalchemy.orm import Session, relationship
+from sqlalchemy.ext.asyncio import AsyncSession
+from context_manager.context import get_db_session
+from sqlalchemy import select
 
 from database import DBBaseClass, DBBase
 
@@ -56,9 +59,19 @@ class Company(DBBase, DBBaseClass):
 
         return company_data.__to_model()
 
+    # @classmethod
+    # def get_by_id(cls, id):
+    #     company = super().get_by_id(id)
+    #     return company.__to_model() if company else None
+
     @classmethod
-    def get_by_id(cls, id):
-        company = super().get_by_id(id)
+    async def get_by_id(cls, id: int):
+        db: AsyncSession = get_db_session()  # get async session from context
+        if not db:
+            raise Exception("DB session not initialized in context!")
+
+        result = await db.execute(select(cls).where(cls.id == id))
+        company = result.scalars().first()
         return company.__to_model() if company else None
 
     @classmethod

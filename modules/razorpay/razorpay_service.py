@@ -5,6 +5,7 @@ from datetime import datetime
 from pydantic import BaseModel
 import razorpay
 from psycopg2 import DatabaseError
+from sqlalchemy.ext.asyncio import AsyncSession
 import razorpay.errors
 
 from context_manager.context import context_user_data, get_db_session
@@ -32,22 +33,85 @@ class Razorpay:
 
     client = razorpay.Client(auth=(KEY_ID, SECRET_KEY))
 
+    # @staticmethod
+    # def create_order(amount: float, wallet_type: str) -> GenericResponseModel:
+    #     try:
+
+    #         client_id = context_user_data.get().client_id
+
+    #         payload = {"amount": amount * 100, "currency": "INR"}
+
+    #         # create a razor pay order that will give us an order id, that will then be used to complete the transaction at the frontend
+    #         order = Razorpay.client.order.create(data=payload)
+
+    #         # in case the order creation fails, return payment failed
+    #         if order is None or order.get("error", ""):
+    #             GenericResponseModel(
+    #                 status_code=http.HTTPStatus.BAD_REQUEST,
+    #                 message=(order["error"].get("description", "Payment Failed")),
+    #             )
+
+    #         recharge_type = (
+    #             "wallet recharge"
+    #             if wallet_type == "wallet"
+    #             else "shipping notifications"
+    #         )
+
+    #         # create a payment log in the payment records table
+    #         with get_db_session() as db:
+    #             db.add(
+    #                 PaymentRecords(
+    #                     gateway="razorpay",
+    #                     order_id=order["id"],
+    #                     status="payment initiated",
+    #                     amount=amount,
+    #                     currency="INR",
+    #                     type=recharge_type,
+    #                     client_id=client_id,
+    #                 )
+    #             )
+    #             db.commit()
+
+    #         # return order data
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.OK,
+    #             status=True,
+    #             data={
+    #                 "order_id": order["id"],
+    #                 "amount": amount,
+    #                 "currency": "INR",
+    #                 "key": Razorpay.KEY_ID,  # Send key to frontend
+    #             },
+    #             message="Razorpay Payment Initiated",
+    #         )
+
+    #     except DatabaseError as e:
+    #         # Log database error
+    #         logger.error(
+    #             extra=context_user_data.get(),
+    #             msg="Error initiating payment: {}".format(str(e)),
+    #         )
+
+    #         # Return error response
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="Payment Failed.",
+    #         )
     @staticmethod
-    def create_order(amount: float, wallet_type: str) -> GenericResponseModel:
+    async def create_order(amount: float, wallet_type: str) -> GenericResponseModel:
         try:
-
             client_id = context_user_data.get().client_id
-
             payload = {"amount": amount * 100, "currency": "INR"}
 
-            # create a razor pay order that will give us an order id, that will then be used to complete the transaction at the frontend
+            # create razorpay order
             order = Razorpay.client.order.create(data=payload)
 
-            # in case the order creation fails, return payment failed
             if order is None or order.get("error", ""):
-                GenericResponseModel(
+                return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
-                    message=(order["error"].get("description", "Payment Failed")),
+                    message=(
+                        order.get("error", {}).get("description", "Payment Failed")
+                    ),
                 )
 
             recharge_type = (
@@ -56,8 +120,9 @@ class Razorpay:
                 else "shipping notifications"
             )
 
-            # create a payment log in the payment records table
-            with get_db_session() as db:
+            # create payment log asynchronously
+            db: AsyncSession = get_db_session()
+            try:
                 db.add(
                     PaymentRecords(
                         gateway="razorpay",
@@ -69,9 +134,10 @@ class Razorpay:
                         client_id=client_id,
                     )
                 )
-                db.commit()
+                await db.commit()
+            finally:
+                await db.close()
 
-            # return order data
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 status=True,
@@ -79,19 +145,16 @@ class Razorpay:
                     "order_id": order["id"],
                     "amount": amount,
                     "currency": "INR",
-                    "key": Razorpay.KEY_ID,  # Send key to frontend
+                    "key": Razorpay.KEY_ID,
                 },
                 message="Razorpay Payment Initiated",
             )
 
         except DatabaseError as e:
-            # Log database error
             logger.error(
                 extra=context_user_data.get(),
-                msg="Error initiating payment: {}".format(str(e)),
+                msg=f"Error initiating payment: {str(e)}",
             )
-
-            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Payment Failed.",

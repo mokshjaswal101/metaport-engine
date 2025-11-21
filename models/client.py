@@ -1,6 +1,8 @@
 from sqlalchemy import Column, String, Integer, ForeignKey, Boolean
 from sqlalchemy.orm import relationship, Session
-
+from context_manager.context import get_db_session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 from database import DBBaseClass, DBBase
 from fastapi.encoders import jsonable_encoder
 import uuid as uuid
@@ -52,20 +54,38 @@ class Client(DBBase, DBBaseClass):
         return Client(**entity)
 
     @classmethod
-    def create_client(cls, client_data):
+    async def create_client(cls, client_data):
         from context_manager.context import get_db_session
 
-        db: Session = get_db_session()
-        # print(jsonable_encoder(client_data))
+        db: AsyncSession = get_db_session()
         db.add(client_data)
-        db.flush()
+        await db.flush()  # await is required
 
         return client_data.to_model()
 
+    # @classmethod
+    # def get_by_id(cls, id):
+    #     client = super().get_by_id(id)
+    #     return client.to_model() if client else None
+    # @classmethod
+    # async def get_by_id(cls, id: int):
+    #     db: AsyncSession = get_db_session()  # get async session from context
+    #     if not db:
+    #         raise Exception("DB session not initialized in context!")
+
+    #     result = await db.execute(select(cls).where(cls.id == id))
+    #     company = result.scalars().first()
+    #     return company.__to_model() if company else None
+
     @classmethod
-    def get_by_id(cls, id):
-        client = super().get_by_id(id)
-        return client.to_model() if client else None
+    async def get_by_id(cls, id: int):
+        db: AsyncSession = get_db_session()  # get async session from context
+        if not db:
+            raise Exception("DB session not initialized in context!")
+
+        result = await db.execute(select(cls).where(cls.id == id))
+        client = result.scalars().first()  # variable name fixed
+        return client.to_model() if client else None  # use to_model()
 
     @classmethod
     def get_by_uuid(cls, uuid):

@@ -25,7 +25,9 @@ dashboard_router = APIRouter(tags=["dashboard"], prefix="/dashboard")
 )
 async def get_performance_data(filters: dashboard_filters):
     print("inside")
-    response: GenericResponseModel = DashboardService.get_performance_data(
+
+    # If your service method is async
+    response: GenericResponseModel = await DashboardService.get_performance_data(
         filters=filters
     )
 

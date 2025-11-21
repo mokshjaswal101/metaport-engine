@@ -59,8 +59,8 @@ async def generate_invoice(generateLabelRequest: generateLabelRequest):
     status_code=http.HTTPStatus.OK,
 )
 async def get_shipping_label_settings():
-    response: GenericResponseModel = ShippingLabelService.get_label_settings()
-
+    # Call async service method
+    response: GenericResponseModel = await ShippingLabelService.get_label_settings()
     return build_api_response(response)
 
 
@@ -69,16 +69,18 @@ async def get_shipping_label_settings():
     status_code=http.HTTPStatus.OK,
 )
 async def update_shipping_label_settings(label_parameters: LabelSettingUpdateModel):
-    response: GenericResponseModel = ShippingLabelService.update_label_settings(
+    # Call async service method
+    response: GenericResponseModel = await ShippingLabelService.update_label_settings(
         label_parameters=label_parameters
     )
-
     return build_api_response(response)
 
 
 @label_router.post(
-    "/settings/shipping-label/upload-logo", status_code=http.HTTPStatus.OK
+    "/settings/shipping-label/upload-logo",
+    status_code=http.HTTPStatus.OK,
 )
 async def upload_logo(file: UploadFile = File(...)):
-    response = ShippingLabelService.upload_logo(file)
+    # Call async service method
+    response: GenericResponseModel = await ShippingLabelService.upload_logo(file)
     return build_api_response(response)

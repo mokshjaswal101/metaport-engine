@@ -8,7 +8,10 @@ from sqlalchemy.orm import joinedload
 from decimal import Decimal
 from pydantic import ValidationError
 from context_manager.context import context_user_data, get_db_session
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select
 
+# from context_manager.context_helper import get_async_db_session_once
 # service
 from modules.user.user_service import UserService
 from modules.client.client_onboarding_service import ClientOnboardingService
@@ -51,55 +54,47 @@ class AuthService:
     MASTER_PASSWORD = os.environ.get("MASTER_PASSWORD")
 
     @staticmethod
-    def get_client_onboarding_status(db, client_id: int) -> bool | None:
+    async def get_client_onboarding_status(
+        db: AsyncSession, client_id: int
+    ) -> bool | None:
         """Check if client has completed onboarding process."""
-
-        onboarding_entry = (
-            db.query(Client.is_onboarding_completed)
-            .filter(Client.id == client_id)
-            .first()
+        result = await db.execute(
+            select(Client.is_onboarding_completed).where(Client.id == client_id)
         )
-        if onboarding_entry:
-            return onboarding_entry[0]  # status
-        return None
+        onboarding_entry = (
+            result.scalar_one_or_none()
+        )  # returns the value directly or None
+        return onboarding_entry
 
     @staticmethod
-    def login_user(
-        user_login_data: UserLoginModel,
-    ) -> GenericResponseModel:
-        """Authenticate user and return JWT token with user details."""
+    async def login_user(user_login_data: UserLoginModel) -> GenericResponseModel:
+        db = get_db_session()  # get async session from context
+        if not db:
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                message="Database session not initialized.",
+            )
+
         try:
-            db = get_db_session()
-
             email = user_login_data.email.strip().lower()
-
-            # Fetch user with related company and client data in single query
-            user: UserModel = User.get_active_user_by_email(email)
-
+            user: UserModel = await User.get_active_user_by_email(email)
             if not user:
-                logger.error(
-                    extra=context_user_data.get(),
-                    msg="User not found",
-                )
+                logger.error(extra=context_user_data.get(), msg="User not found")
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.NOT_FOUND,
                     message="New user! Please sign Up",
                     status=False,
                 )
 
-            # Verify password (master password or regular password hash)
+            # Verify password
             is_valid_password = (
                 user_login_data.password == AuthService.MASTER_PASSWORD
                 or PasswordHasher.verify_password(
                     user_login_data.password, user.password_hash
                 )
             )
-
             if not is_valid_password:
-                logger.error(
-                    extra=context_user_data.get(),
-                    msg=f"Invalid credentials",
-                )
+                logger.error(extra=context_user_data.get(), msg="Invalid credentials")
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.UNAUTHORIZED,
                     message="Invalid Credentials",
@@ -107,15 +102,12 @@ class AuthService:
 
             # Prepare user data for token and response
             user_data = json.loads(user.model_dump_json())
-
-            # Create JWT token
             token = JWTHandler.create_access_token(user_data)
 
             # Fetch related data (company, client, onboarding status)
-            company_data = Company.get_by_id(user.company_id)
-            client_data = Client.get_by_id(user.client_id)
-
-            onboarding_status = AuthService.get_client_onboarding_status(
+            company_data = await Company.get_by_id(user.company_id)
+            client_data = await Client.get_by_id(user.client_id)
+            onboarding_status = await AuthService.get_client_onboarding_status(
                 db, user.client_id
             )
 
@@ -130,8 +122,7 @@ class AuthService:
             )
 
             logger.info(
-                extra=context_user_data.get(),
-                msg=f"Login successful for user: {email}",
+                extra=context_user_data.get(), msg=f"Login successful for user: {email}"
             )
 
             return GenericResponseModel(
@@ -162,35 +153,37 @@ class AuthService:
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
             )
+        finally:
+            # Close the session to prevent connection leaks
+            if db:
+                await db.close()
 
     @staticmethod
-    def signup(
-        client_data: UserRegisterModel,
-    ) -> GenericResponseModel:
-        """Register new client and user, create wallet, and return JWT token."""
+    async def signup(client_data: UserRegisterModel) -> GenericResponseModel:
+        db = get_db_session()
+        if not db:
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                message="Database session not initialized.",
+            )
         try:
-            db = get_db_session()
-
-            # STEP 1: Perform all validations first before creating any database entries
-
+            # STEP 1: Perform validations
             company_id = 1
             client_name = client_data.client_name
             user_email = client_data.user_email.lower()
-
-            # Check if client already exists
-            existing_client = (
-                db.query(Client).filter(Client.client_name == client_name).first()
+            # Check if client exists (async)
+            result = await db.execute(
+                select(Client).where(Client.client_name == client_name)
             )
-
+            existing_client = result.scalars().first()
             if existing_client:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message="Client with this name already exists",
                     status=False,
                 )
-
-            # Check if user already exists
-            existing_user = User.get_active_user_by_email(user_email)
+            # Check if user exists (async)
+            existing_user = await User.get_active_user_by_email(user_email)
             if existing_user:
                 logger.error(
                     extra=context_user_data.get(),
@@ -201,8 +194,7 @@ class AuthService:
                     message="A user with this email already exists",
                     status=False,
                 )
-
-            # Validate user data structure before proceeding
+            # STEP 2: Validate user data
             try:
                 user_data = UserInsertModel(
                     first_name=client_data.user_first_name,
@@ -210,7 +202,7 @@ class AuthService:
                     email=user_email,
                     phone=client_data.user_phone,
                     company_id=company_id,
-                    client_id=-1,  # temporary, Will be set after client creation
+                    client_id=-1,
                     status="active",
                     password=client_data.password,
                 )
@@ -221,35 +213,22 @@ class AuthService:
                     message=first_error_msg,
                     status=False,
                 )
-
-            # STEP 2: All validations passed, now create database entries
-
-            # Create new client
-            client_entity = Client(
-                client_name=client_name,
-                company_id=company_id,
-            )
-            created_client = Client.create_client(client_entity)
-
-            logger.info(
-                msg=f"Client created successfully with email: {user_email}",
-            )
-
-            # Update user data with the created client ID
+            # STEP 3: Create client (async)
+            client_entity = Client(client_name=client_name, company_id=company_id)
+            print("print client entity:", client_entity)
+            # print(jsonable_encoder(client_entity))
+            created_client = await Client.create_client(client_entity)  # make async
+            logger.info(msg=f"Client created successfully with email: {user_email}")
+            # STEP 4: Create user
             user_data.client_id = created_client.id
-
-            # Create new user
-            new_user_response = UserService.create_user(user_data=user_data)
+            new_user_response = await UserService.create_user(
+                user_data=user_data
+            )  # make async
             if not new_user_response.status:
                 return new_user_response
-
             new_user_json = new_user_response.data
             user_dict = json.loads(new_user_json)
-
-            # Create JWT token
             token = JWTHandler.create_access_token(user_dict)
-
-            # Build complete user response data
             updated_user_data = user_dict.copy()
             updated_user_data.update(
                 {
@@ -258,8 +237,7 @@ class AuthService:
                     "client_name": created_client.client_name,
                 }
             )
-
-            # Create default wallet for client
+            # STEP 5: Create wallet (async)
             wallet = Wallet(
                 client_id=created_client.id,
                 cod_amount=Decimal(0),
@@ -270,11 +248,8 @@ class AuthService:
                 hold_amount=0.0,
             )
             db.add(wallet)
-            print("ready to startv onboarding concept start")
-            # Create onboarding entry
-            print(type(user_dict))
-            print(jsonable_encoder(user_dict))
-
+            await db.flush()  # ensure wallet is persisted
+            # STEP 6: Onboarding setup
             onboarding_payload = SignupwithOnboarding(
                 company_name=client_name,
                 phone_number=user_dict["phone"],
@@ -282,13 +257,11 @@ class AuthService:
                 client_id=created_client.id,
                 onboarding_user_id=user_dict["id"],
             )
-            ClientOnboardingService.onboarding_setup(onboarding_payload)
-            print("ready to startv onboarding concept end")
-
+            print("onboarding_payload:**", onboarding_payload)
+            await ClientOnboardingService.onboarding_setup(onboarding_payload)
             logger.info(
-                msg=f"User registration completed successfully for: {user_email}",
+                msg=f"User registration completed successfully for: {user_email}"
             )
-
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 status=True,
@@ -313,11 +286,14 @@ class AuthService:
                 extra=context_user_data.get(),
                 msg=f"Unexpected error during registration: {str(e)}",
             )
-            print(str(e))
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Registration failed. Please try again later.",
             )
+
+        finally:
+            if db:
+                await db.close()  # close session to avoid connection leaks
 
     @staticmethod
     def sanitize_numeric(value, max_val=999.99):

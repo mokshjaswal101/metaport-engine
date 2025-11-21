@@ -1,7 +1,8 @@
 import http
 from fastapi import APIRouter
-from fastapi import APIRouter
+from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Any
+import asyncio
 
 # schema
 from schema.base import GenericResponseModel
@@ -32,14 +33,27 @@ async def recharge_wallet(wallet_options: walletOptionsSchema):
     return build_api_response(response)
 
 
+# @wallet_router.post(
+#     "/payu/recharge",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def recharge_wallet(params: PaymentRequest):
+#     print("1")
+#     response: GenericResponseModel = PayU.create_payment(payment_request=params)
+#     return build_api_response(response)
+
+
 @wallet_router.post(
-    "/payu/recharge",
+    "/recharge",
     status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
-async def recharge_wallet(params: PaymentRequest):
-    print("1")
-    response: GenericResponseModel = PayU.create_payment(payment_request=params)
+async def recharge_wallet(wallet_options: walletOptionsSchema):
+    # Run the synchronous Razorpay call in a separate thread
+    response: GenericResponseModel = await asyncio.to_thread(
+        Razorpay.create_order, wallet_options.amount, wallet_options.wallet_type
+    )
     return build_api_response(response)
 
 
@@ -49,7 +63,8 @@ async def recharge_wallet(params: PaymentRequest):
     response_model=GenericResponseModel,
 )
 async def get_balance():
-    response: GenericResponseModel = WalletService.get_balance()
+    print("Get balance called")
+    response: GenericResponseModel = await WalletService.get_balance()
     return build_api_response(response)
 
 

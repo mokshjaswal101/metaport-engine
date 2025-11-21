@@ -34,6 +34,18 @@ async def create_new_client(
     return build_api_response(response)
 
 
+# @user_router.post(
+#     "/profile/change-password",
+#     status_code=http.HTTPStatus.CREATED,
+#     response_model=GenericResponseModel,
+# )
+# async def change_user_password(
+#     user_data: ChangePasswordModel,
+# ):
+#     response: GenericResponseModel = UserService.change_password(user_data=user_data)
+#     return build_api_response(response)
+
+
 @user_router.post(
     "/profile/change-password",
     status_code=http.HTTPStatus.CREATED,
@@ -42,5 +54,8 @@ async def create_new_client(
 async def change_user_password(
     user_data: ChangePasswordModel,
 ):
-    response: GenericResponseModel = UserService.change_password(user_data=user_data)
+    # Call async service method
+    response: GenericResponseModel = await UserService.change_password(
+        user_data=user_data
+    )
     return build_api_response(response)

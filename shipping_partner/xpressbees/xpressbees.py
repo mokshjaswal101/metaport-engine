@@ -5,12 +5,16 @@ import requests
 from datetime import datetime, timedelta
 from datetime import datetime
 from fastapi import Request
+
+import httpx
+from sqlalchemy import select
 import json
 from sqlalchemy.orm import selectinload
 from fastapi.encoders import jsonable_encoder
 
 from decimal import Decimal, InvalidOperation
 from collections import defaultdict
+from httpx import ConnectError, HTTPStatusError, RequestError
 
 # from datetime import timedelta
 from context_manager.context import context_user_data, get_db_session
@@ -299,46 +303,50 @@ class Xpressbees:
                 message="An internal server error occurred. Please try again later.",
             )
 
-    def dev_Generate_Token():
+    @staticmethod
+    async def dev_Generate_Token():
         try:
-            print("<<**welcomr to dev_Generate_Token**>>")
+            print("<<**welcome to dev_Generate_Token**>>")
+
             url = "https://stageusermanagementapi.xbees.in/api/auth/generateToken"
-            payload = json.dumps(
-                {
-                    "username": "admin@surfgene.com",
-                    "password": "Admin@123",
-                    "secretkey": "5efc887632bcbf63a772789473bbf19b0241bc1c42e777c2ca3eb35d9635a029",
-                }
-            )
+            payload = {
+                "username": "admin@surfgene.com",
+                "password": "Admin@123",
+                "secretkey": "5efc887632bcbf63a772789473bbf19b0241bc1c42e777c2ca3eb35d9635a029",
+            }
             headers = {
                 "Authorization": "Bearer xyz",
                 "Content-Type": "application/json",
             }
-            response = requests.request("POST", url, headers=headers, data=payload)
+
+            # ---- ASYNC HTTP CALL ----
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.post(url, json=payload, headers=headers)
+
+            # Raise error for non-200 responses
             response.raise_for_status()
+
             return response.json()
 
-        except ConnectionError:
-            logger.error(
-                "Error: Unable to connect to the Xpressbees API. Check the URL or network connection."
-            )
+        except ConnectError:
+            logger.error("Unable to connect to the Xpressbees API.")
             return {"error": "Unable to connect to the Xpressbees API"}
 
-        except Timeout:
-            logger.error("Error: The request to the Xpressbees API timed out.")
+        except httpx.TimeoutException:
+            logger.error("The request to Xpressbees timed out.")
             return {"error": "Request timed out"}
 
-        except HTTPError as http_err:
-            logger.error("HTTP error occurred", http_err)
+        except HTTPStatusError as http_err:
+            logger.error(f"HTTP error: {http_err}")
             return {"error": f"HTTP error: {http_err}"}
 
-        except RequestException as req_err:
-            logger.error("An error occurred", req_err)
+        except RequestError as req_err:
+            logger.error(f"Request error: {req_err}")
             return {"error": f"Request error: {req_err}"}
 
         except Exception as e:
-            logger.error("Unexpected error", e)
-            return {"error": "An unexpected error occurred"}("credentials")
+            logger.error(f"Unexpected error: {e}")
+            return {"error": "An unexpected error occurred"}
 
     def contract_transfer():
         with get_db_session() as db:
@@ -1305,363 +1313,774 @@ class Xpressbees:
                 message="An internal server error occurred. Please try again later.",
             )
 
+    # @staticmethod
+    # def dev_create_order(
+    #     order: Order_Model,
+    #     credentials: Dict[str, str],
+    #     delivery_partner: AggregatorCourierModel,
+    # ):
+    #     try:
+    #         print(
+    #             "welcome to express beex dev function",
+    #             jsonable_encoder(delivery_partner),
+    #         )
+    #         client_id = context_user_data.get().client_id
+    #         db = get_db_session()
+    #         pickup_location = (
+    #             db.query(Pickup_Location)
+    #             .filter(Pickup_Location.location_code == order.pickup_location_code)
+    #             .first()
+    #         )
+    #         token = Xpressbees.dev_Generate_Token()
+    #         body = {
+    #             "clientDetails": {
+    #                 "clientId": "6295",
+    #                 "clientName": "Genex",
+    #                 "pickupVendorCode": 9,
+    #                 "clientWarehouseId": "123",
+    #             },
+    #             "serviceDetails": {
+    #                 "serviceName": "Forward",
+    #                 "serviceMode": "SURFACE",
+    #                 "serviceVertical": "Ecom",
+    #                 "serviceType": "SD",
+    #             },
+    #             "shipmentDetails": {
+    #                 "awbMpsGroupId": "",
+    #                 "packageType": "packageType",
+    #                 "orderType": "pre",
+    #                 "partialRTOAllowed": False,
+    #                 "allowPartialPickup": False,
+    #                 "packageQuantity": {"value": 1, "unit": "Pck"},
+    #                 "totalWeight": {"value": 10, "unit": "kg"},
+    #                 "orderDetails": [
+    #                     {
+    #                         "orderNumber": "324324wdsfsd43538",
+    #                         "awbNumber": "",
+    #                         "subOrderNumber": "subOrderNumber",
+    #                         "customerPromiseDate": "22-11-2025 10:14:13",
+    #                         "manifestId": "manifestId",
+    #                         "collectableAmount": {"unit": "INR", "value": 299},
+    #                         "declaredAmount": {"value": 51000, "unit": "INR"},
+    #                         "helpContent": {
+    #                             "senderName": None,
+    #                             "isOpenDelivery": None,
+    #                             "isCommercialProperty": None,
+    #                             "isDGShipmentType": None,
+    #                         },
+    #                         "pickUpInstruction": {
+    #                             "pickupType": "Vendor",
+    #                             "priorityRemarks": "PRIORITY_REMARKS",
+    #                             "isPickupPriority": "1",
+    #                             "pickupInstruction": None,
+    #                             "pickupSlotsDate": "22-11-2025 10:14:13",
+    #                         },
+    #                         "packageDetails": {
+    #                             "packageDimension": {
+    #                                 "length": {"value": 0, "unit": "m"},
+    #                                 "width": {"value": 0, "unit": "m"},
+    #                                 "height": {"value": 0, "unit": "m"},
+    #                             },
+    #                             "packageWeight": {
+    #                                 "physicalWeight": {"value": 0, "unit": "Kg"},
+    #                                 "volumetricWeight": {"value": 0, "unit": "Kg"},
+    #                                 "billableWeight": {"value": 0, "unit": "Kg"},
+    #                             },
+    #                         },
+    #                         "invoiceDetails": [
+    #                             {
+    #                                 "invoiceNumber": "",
+    #                                 "invoiceDate": "26-04-2023 10:16:13",
+    #                                 "invoiceValue": 51000,
+    #                                 "ebnExpDate": "26-04-2023 12:12:12",
+    #                                 "ebnNumber": "123123",
+    #                                 "billFrom": {
+    #                                     "customerDetails": {
+    #                                         "countryType": "ISO2",
+    #                                         "type": "PRIMARY",
+    #                                         "country": "Ind",
+    #                                         "name": "seller",
+    #                                         "addressLine": "billFromAddressline0",
+    #                                         "pincode": 110075,
+    #                                         "stateCountry": "maharastra",
+    #                                         "city": None,
+    #                                     },
+    #                                     "contactDetails": {"type": "PRIMARY"},
+    #                                     "tinNumber": {
+    #                                         "taxIdentificationNumber": "27DKKPS2852A1ZM"
+    #                                     },
+    #                                 },
+    #                                 "billTo": {
+    #                                     "customerDetails": {
+    #                                         "countryType": "ISO2",
+    #                                         "type": "PRIMARY",
+    #                                         "name": "",
+    #                                         "addressLine": "",
+    #                                         "country": "Ind",
+    #                                     },
+    #                                     "contactDetails": {
+    #                                         "emailid": "billToName0@gmail.com",
+    #                                         "type": "Primary",
+    #                                         "contactNumber": "",
+    #                                         "virtualNumber": None,
+    #                                     },
+    #                                     "tinNumber": {
+    #                                         "taxIdentificationNumber": "27DKKPS2852A1ZM"
+    #                                     },
+    #                                 },
+    #                                 "productDetails": [
+    #                                     {
+    #                                         "productUniqueId": "",
+    #                                         "productName": "PRODUCT_NAME",
+    #                                         "productValue": "productValue",
+    #                                         "productDescription": "Tops and T-shirts",
+    #                                         "productCategory": "Clothes & Shoes",
+    #                                         "productQuantity": "1",
+    #                                         "tax": [
+    #                                             {
+    #                                                 "taxType": "CGST1",
+    #                                                 "taxValue": 0,
+    #                                                 "taxPercentage": 0,
+    #                                             },
+    #                                             {
+    #                                                 "taxType": "IGST",
+    #                                                 "taxValue": 10,
+    #                                                 "taxPercentage": 0,
+    #                                             },
+    #                                             {
+    #                                                 "taxType": "SGST1",
+    #                                                 "taxValue": 0,
+    #                                                 "taxPercentage": 0,
+    #                                             },
+    #                                         ],
+    #                                         "hsnCode": "",
+    #                                         "preTaxValue": 10,
+    #                                         "discount": 0,
+    #                                         "qcDetails": {
+    #                                             "isQualityCheck": True,
+    #                                             "qcTemplateDetails": {
+    #                                                 "templateId": None,
+    #                                                 "templateCategory": None,
+    #                                             },
+    #                                             "textCapture": [
+    #                                                 {
+    #                                                     "label": None,
+    #                                                     "type": None,
+    #                                                     "valueToCheck": None,
+    #                                                 }
+    #                                             ],
+    #                                             "pickupProductImage": [
+    #                                                 {
+    #                                                     "ImageUrl": "http://cdn.fc/box/11521166a.jpg",
+    #                                                     "TextToShow": "Front Image",
+    #                                                 }
+    #                                             ],
+    #                                             "captureImageRule": {
+    #                                                 "minImage": 0,
+    #                                                 "maxImage": 0,
+    #                                             },
+    #                                             "nonQcRVPType": "OpenBox1",
+    #                                         },
+    #                                     },
+    #                                     {
+    #                                         "productUniqueId": "productUniqueId2",
+    #                                         "productName": "PRODUCT_NAME2",
+    #                                         "productValue": "productValue2",
+    #                                         "productDescription": "Tops and T-shirts2",
+    #                                         "productCategory": "Clothes & Shoes2",
+    #                                         "productQuantity": "1",
+    #                                         "tax": [
+    #                                             {
+    #                                                 "taxType": "CGST1",
+    #                                                 "taxValue": 100,
+    #                                                 "taxPercentage": 12,
+    #                                             },
+    #                                             {
+    #                                                 "taxType": "IGST",
+    #                                                 "taxValue": 200,
+    #                                                 "taxPercentage": 15,
+    #                                             },
+    #                                             {
+    #                                                 "taxType": "SGST",
+    #                                                 "taxValue": 100,
+    #                                                 "taxPercentage": 10,
+    #                                             },
+    #                                         ],
+    #                                         "hsnCode": "61091002",
+    #                                         "preTaxValue": 102,
+    #                                         "discount": 20,
+    #                                         "qcDetails": None,
+    #                                     },
+    #                                 ],
+    #                             }
+    #                         ],
+    #                     }
+    #                 ],
+    #             },
+    #             "bufferAttribute": [],
+    #             "shippingDetails": {
+    #                 "dropDetails": {
+    #                     "address": [
+    #                         {
+    #                             "country": "Ind",
+    #                             "countryType": "ISO2",
+    #                             "name": "dropname0",
+    #                             "addressLine": "dropaddressLine0",
+    #                             "city": "LUHARI",
+    #                             "stateCountry": "HARYANA",
+    #                             "landmark": "",
+    #                             "pincode": "110075",
+    #                             "type": "PRIMARY",
+    #                         }
+    #                     ],
+    #                     "contactDetails": [
+    #                         {
+    #                             "emailid": "",
+    #                             "type": "Primary",
+    #                             "contactNumber": "1234567890",
+    #                             "virtualNumber": None,
+    #                         },
+    #                         {
+    #                             "emailid": "dropSecondary1@gmail.com",
+    #                             "type": "Secondary",
+    #                             "contactNumber": "1234567891",
+    #                             "virtualNumber": None,
+    #                         },
+    #                     ],
+    #                     "geoFencingInstruction": {
+    #                         "latitude": None,
+    #                         "longitude": None,
+    #                         "isGeoFencingEnabled": None,
+    #                     },
+    #                     "securityInstructions": {"securityCode": None},
+    #                 },
+    #                 "pickupDetails": {
+    #                     "address": [
+    #                         {
+    #                             "country": "Ind",
+    #                             "countryType": "ISO2",
+    #                             "name": "Shazli",
+    #                             "addressLine": "c48b0950f3bef",
+    #                             "city": "Kanpur Nagar",
+    #                             "stateCountry": "Uttar Pradesh",
+    #                             "landmark": "",
+    #                             "pincode": "110001",
+    #                             "type": "Primary",
+    #                         },
+    #                         {
+    #                             "country": "Ind",
+    #                             "countryType": "ISO2",
+    #                             "name": "Shazli2",
+    #                             "addressLine": "c48b0950fc085ef",
+    #                             "city": "Kanpur Nagar",
+    #                             "stateCountry": "Uttar Pradesh",
+    #                             "landmark": "",
+    #                             "pincode": "110075",
+    #                             "type": None,
+    #                         },
+    #                     ],
+    #                     "contactDetails": [
+    #                         {
+    #                             "emailid": "",
+    #                             "type": "Primary",
+    #                             "contactNumber": "1234567890",
+    #                             "virtualNumber": "",
+    #                         }
+    #                     ],
+    #                     "geoFencingInstruction": {
+    #                         "latitude": None,
+    #                         "longitude": None,
+    #                         "isGeoFencingEnabled": None,
+    #                     },
+    #                     "securityInstructions": {"securityCode": None},
+    #                 },
+    #                 "RTODetails": {
+    #                     "address": [
+    #                         {
+    #                             "name": "RAKSHIT GOYAL",
+    #                             "addressLine": "SCO 261 First Floor BASKET",
+    #                             "landmark": "string",
+    #                             "city": "PANCHKULA",
+    #                             "stateCountry": "Tamil Nadu",
+    #                             "pincode": 110075,
+    #                             "countryType": "ISO2",
+    #                             "country": "ind",
+    #                             "type": "primary",
+    #                         }
+    #                     ],
+    #                     "contactDetails": [
+    #                         {
+    #                             "contactNumberExt": 91,
+    #                             "contactNumber": 9465637062,
+    #                             "virtualNumber": 0,
+    #                             "emailid": "e@gmail.com",
+    #                             "type": "primary",
+    #                         }
+    #                     ],
+    #                     "customerTinDetails": {
+    #                         "taxIdentificationNumber": 1230,
+    #                         "taxIdentificationNumberType": "PERSONAL_NATIONAL",
+    #                         "usage": 0,
+    #                         "effictiveDate": None,
+    #                         "expirationDate": None,
+    #                     },
+    #                     "geoFencingInstruction": {
+    #                         "isGeoFencingEnabled": None,
+    #                         "latitude": 0,
+    #                         "longitude": 0,
+    #                     },
+    #                     "securityInstructions": {
+    #                         "isGenSecurityCode": False,
+    #                         "securityCode": 0,
+    #                     },
+    #                 },
+    #             },
+    #         }
+    #         # print(body)
+    #         # print(2)
+    #         api_url = "https://stage-global-api.xbees.in/global/v1/serviceRequest"
+    #         headers = {"token": token["token"], "Content-Type": "application/json"}
+    #         response = requests.request("POST", api_url, headers=headers, json=body)
+    #         # print(3)
+    #         try:
+    #             response_data = response.json()
+    #             print(response_data, "Expressbees")
+    #         except ValueError as e:
+    #             logger.error("Failed to parse JSON response: %s", e)
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #                 message="Some error occurred while assigning AWB, please try again",
+    #             )
+    #         # If order creation failed at Xpressbees, return message
+    #         if response_data["code"] != 100:
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.BAD_REQUEST,
+    #                 message=response_data["message"],
+    #             )
+
+    #         # if order created successfully at Xpressbees
+
+    #         print(
+    #             response_data["code"],
+    #             "<<Code section>>",
+    #             jsonable_encoder(delivery_partner),
+    #         )
+
+    #         if response_data["code"] == 100:
+
+    #             # print(5)
+    #             # update status
+    #             order.status = "booked"
+    #             order.sub_status = "booked"
+    #             order.courier_status = "BOOKED"
+
+    #             order.awb_number = response_data["data"][0]["AWBNo"]
+    #             order.aggregator = "xpressbees"
+    #             order.shipping_partner_order_id = response_data["data"][0][
+    #                 "TokenNumber"
+    #             ]
+    #             order.courier_partner = delivery_partner.slug
+
+    #             new_activity = {
+    #                 "event": "Shipment Created",
+    #                 "subinfo": "delivery partner - " + str("xpressbees"),
+    #                 "date": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
+    #             }
+
+    #             # update the activity
+    #             # print(6)
+
+    #             order.action_history.append(new_activity)
+    #             db.add(order)
+    #             db.commit()
+
+    #             print("007")
+
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.OK,
+    #                 status=True,
+    #                 data={
+    #                     "awb_number": response_data["data"][0]["AWBNo"],
+    #                     "delivery_partner": "xpressbees",
+    #                 },
+    #                 message="AWB assigned successfully",
+    #             )
+
+    #         else:
+    #             logger.error(
+    #                 extra=context_user_data.get(),
+    #                 msg="Xpressbees Error is status is not OK: {}".format(
+    #                     str(response_data)
+    #                 ),
+    #             )
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.BAD_REQUEST,
+    #                 message=response_data["data"],
+    #             )
+    #     except DatabaseError as e:
+    #         # Log database error
+    #         logger.error(
+    #             extra=context_user_data.get(),
+    #             msg="Xpressbees Error posting shipment: {}".format(str(e)),
+    #         )
+
+    #         # Return error response
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="An error occurred while posting the shipment.",
+    #         )
+
+    #     except Exception as e:
+    #         # Log other unhandled exceptions
+    #         logger.error(
+    #             extra=context_user_data.get(),
+    #             msg="Xpressbees Unhandled error: {}".format(str(e)),
+    #         )
+    #         # Return a general internal server error response
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="An internal server error occurred. Please try again later.",
+    #         )
+
     @staticmethod
-    def dev_create_order(
-        order: Order_Model,
-        credentials: Dict[str, str],
-        delivery_partner: AggregatorCourierModel,
-    ):
+    async def dev_create_order(order, credentials, delivery_partner):
         try:
-            print(
-                "welcome to express beex dev function",
-                jsonable_encoder(delivery_partner),
-            )
             client_id = context_user_data.get().client_id
-            db = get_db_session()
-            pickup_location = (
-                db.query(Pickup_Location)
-                .filter(Pickup_Location.location_code == order.pickup_location_code)
-                .first()
-            )
-            token = Xpressbees.dev_Generate_Token()
-            body = {
-                "clientDetails": {
-                    "clientId": "6295",
-                    "clientName": "Genex",
-                    "pickupVendorCode": 9,
-                    "clientWarehouseId": "123",
-                },
-                "serviceDetails": {
-                    "serviceName": "Forward",
-                    "serviceMode": "SURFACE",
-                    "serviceVertical": "Ecom",
-                    "serviceType": "SD",
-                },
-                "shipmentDetails": {
-                    "awbMpsGroupId": "",
-                    "packageType": "packageType",
-                    "orderType": "pre",
-                    "partialRTOAllowed": False,
-                    "allowPartialPickup": False,
-                    "packageQuantity": {"value": 1, "unit": "Pck"},
-                    "totalWeight": {"value": 10, "unit": "kg"},
-                    "orderDetails": [
-                        {
-                            "orderNumber": "324324wdsfsd43538",
-                            "awbNumber": "",
-                            "subOrderNumber": "subOrderNumber",
-                            "customerPromiseDate": "14-11-2025 10:14:13",
-                            "manifestId": "manifestId",
-                            "collectableAmount": {"unit": "INR", "value": 299},
-                            "declaredAmount": {"value": 51000, "unit": "INR"},
-                            "helpContent": {
-                                "senderName": None,
-                                "isOpenDelivery": None,
-                                "isCommercialProperty": None,
-                                "isDGShipmentType": None,
-                            },
-                            "pickUpInstruction": {
-                                "pickupType": "Vendor",
-                                "priorityRemarks": "PRIORITY_REMARKS",
-                                "isPickupPriority": "1",
-                                "pickupInstruction": None,
-                                "pickupSlotsDate": "14-11-2025 10:14:13",
-                            },
-                            "packageDetails": {
-                                "packageDimension": {
-                                    "length": {"value": 0, "unit": "m"},
-                                    "width": {"value": 0, "unit": "m"},
-                                    "height": {"value": 0, "unit": "m"},
+            async with get_db_session() as db:
+
+                pickup_location = await db.execute(
+                    select(Pickup_Location).filter(
+                        Pickup_Location.location_code == order.pickup_location_code
+                    )
+                )
+                pickup_location = pickup_location.scalar_one_or_none()
+
+                token = await Xpressbees.dev_Generate_Token()
+
+                body = {
+                    "clientDetails": {
+                        "clientId": "6295",
+                        "clientName": "Genex",
+                        "pickupVendorCode": 9,
+                        "clientWarehouseId": "123",
+                    },
+                    "serviceDetails": {
+                        "serviceName": "Forward",
+                        "serviceMode": "SURFACE",
+                        "serviceVertical": "Ecom",
+                        "serviceType": "SD",
+                    },
+                    "shipmentDetails": {
+                        "awbMpsGroupId": "",
+                        "packageType": "packageType",
+                        "orderType": "pre",
+                        "partialRTOAllowed": False,
+                        "allowPartialPickup": False,
+                        "packageQuantity": {"value": 1, "unit": "Pck"},
+                        "totalWeight": {"value": 10, "unit": "kg"},
+                        "orderDetails": [
+                            {
+                                "orderNumber": "324324wdsfsd43538",
+                                "awbNumber": "",
+                                "subOrderNumber": "subOrderNumber",
+                                "customerPromiseDate": "22-11-2025 10:14:13",
+                                "manifestId": "manifestId",
+                                "collectableAmount": {"unit": "INR", "value": 299},
+                                "declaredAmount": {"value": 51000, "unit": "INR"},
+                                "helpContent": {
+                                    "senderName": None,
+                                    "isOpenDelivery": None,
+                                    "isCommercialProperty": None,
+                                    "isDGShipmentType": None,
                                 },
-                                "packageWeight": {
-                                    "physicalWeight": {"value": 0, "unit": "Kg"},
-                                    "volumetricWeight": {"value": 0, "unit": "Kg"},
-                                    "billableWeight": {"value": 0, "unit": "Kg"},
+                                "pickUpInstruction": {
+                                    "pickupType": "Vendor",
+                                    "priorityRemarks": "PRIORITY_REMARKS",
+                                    "isPickupPriority": "1",
+                                    "pickupInstruction": None,
+                                    "pickupSlotsDate": "22-11-2025 10:14:13",
                                 },
-                            },
-                            "invoiceDetails": [
-                                {
-                                    "invoiceNumber": "",
-                                    "invoiceDate": "26-04-2023 10:16:13",
-                                    "invoiceValue": 51000,
-                                    "ebnExpDate": "26-04-2023 12:12:12",
-                                    "ebnNumber": "123123",
-                                    "billFrom": {
-                                        "customerDetails": {
-                                            "countryType": "ISO2",
-                                            "type": "PRIMARY",
-                                            "country": "Ind",
-                                            "name": "seller",
-                                            "addressLine": "billFromAddressline0",
-                                            "pincode": 110075,
-                                            "stateCountry": "maharastra",
-                                            "city": None,
-                                        },
-                                        "contactDetails": {"type": "PRIMARY"},
-                                        "tinNumber": {
-                                            "taxIdentificationNumber": "27DKKPS2852A1ZM"
-                                        },
+                                "packageDetails": {
+                                    "packageDimension": {
+                                        "length": {"value": 0, "unit": "m"},
+                                        "width": {"value": 0, "unit": "m"},
+                                        "height": {"value": 0, "unit": "m"},
                                     },
-                                    "billTo": {
-                                        "customerDetails": {
-                                            "countryType": "ISO2",
-                                            "type": "PRIMARY",
-                                            "name": "",
-                                            "addressLine": "",
-                                            "country": "Ind",
-                                        },
-                                        "contactDetails": {
-                                            "emailid": "billToName0@gmail.com",
-                                            "type": "Primary",
-                                            "contactNumber": "",
-                                            "virtualNumber": None,
-                                        },
-                                        "tinNumber": {
-                                            "taxIdentificationNumber": "27DKKPS2852A1ZM"
-                                        },
+                                    "packageWeight": {
+                                        "physicalWeight": {"value": 0, "unit": "Kg"},
+                                        "volumetricWeight": {"value": 0, "unit": "Kg"},
+                                        "billableWeight": {"value": 0, "unit": "Kg"},
                                     },
-                                    "productDetails": [
-                                        {
-                                            "productUniqueId": "",
-                                            "productName": "PRODUCT_NAME",
-                                            "productValue": "productValue",
-                                            "productDescription": "Tops and T-shirts",
-                                            "productCategory": "Clothes & Shoes",
-                                            "productQuantity": "1",
-                                            "tax": [
-                                                {
-                                                    "taxType": "CGST1",
-                                                    "taxValue": 0,
-                                                    "taxPercentage": 0,
-                                                },
-                                                {
-                                                    "taxType": "IGST",
-                                                    "taxValue": 10,
-                                                    "taxPercentage": 0,
-                                                },
-                                                {
-                                                    "taxType": "SGST1",
-                                                    "taxValue": 0,
-                                                    "taxPercentage": 0,
-                                                },
-                                            ],
-                                            "hsnCode": "",
-                                            "preTaxValue": 10,
-                                            "discount": 0,
-                                            "qcDetails": {
-                                                "isQualityCheck": True,
-                                                "qcTemplateDetails": {
-                                                    "templateId": None,
-                                                    "templateCategory": None,
-                                                },
-                                                "textCapture": [
-                                                    {
-                                                        "label": None,
-                                                        "type": None,
-                                                        "valueToCheck": None,
-                                                    }
-                                                ],
-                                                "pickupProductImage": [
-                                                    {
-                                                        "ImageUrl": "http://cdn.fc/box/11521166a.jpg",
-                                                        "TextToShow": "Front Image",
-                                                    }
-                                                ],
-                                                "captureImageRule": {
-                                                    "minImage": 0,
-                                                    "maxImage": 0,
-                                                },
-                                                "nonQcRVPType": "OpenBox1",
+                                },
+                                "invoiceDetails": [
+                                    {
+                                        "invoiceNumber": "",
+                                        "invoiceDate": "26-04-2023 10:16:13",
+                                        "invoiceValue": 51000,
+                                        "ebnExpDate": "26-04-2023 12:12:12",
+                                        "ebnNumber": "123123",
+                                        "billFrom": {
+                                            "customerDetails": {
+                                                "countryType": "ISO2",
+                                                "type": "PRIMARY",
+                                                "country": "Ind",
+                                                "name": "seller",
+                                                "addressLine": "billFromAddressline0",
+                                                "pincode": 110075,
+                                                "stateCountry": "maharastra",
+                                                "city": None,
+                                            },
+                                            "contactDetails": {"type": "PRIMARY"},
+                                            "tinNumber": {
+                                                "taxIdentificationNumber": "27DKKPS2852A1ZM"
                                             },
                                         },
-                                        {
-                                            "productUniqueId": "productUniqueId2",
-                                            "productName": "PRODUCT_NAME2",
-                                            "productValue": "productValue2",
-                                            "productDescription": "Tops and T-shirts2",
-                                            "productCategory": "Clothes & Shoes2",
-                                            "productQuantity": "1",
-                                            "tax": [
-                                                {
-                                                    "taxType": "CGST1",
-                                                    "taxValue": 100,
-                                                    "taxPercentage": 12,
-                                                },
-                                                {
-                                                    "taxType": "IGST",
-                                                    "taxValue": 200,
-                                                    "taxPercentage": 15,
-                                                },
-                                                {
-                                                    "taxType": "SGST",
-                                                    "taxValue": 100,
-                                                    "taxPercentage": 10,
-                                                },
-                                            ],
-                                            "hsnCode": "61091002",
-                                            "preTaxValue": 102,
-                                            "discount": 20,
-                                            "qcDetails": None,
+                                        "billTo": {
+                                            "customerDetails": {
+                                                "countryType": "ISO2",
+                                                "type": "PRIMARY",
+                                                "name": "",
+                                                "addressLine": "",
+                                                "country": "Ind",
+                                            },
+                                            "contactDetails": {
+                                                "emailid": "billToName0@gmail.com",
+                                                "type": "Primary",
+                                                "contactNumber": "",
+                                                "virtualNumber": None,
+                                            },
+                                            "tinNumber": {
+                                                "taxIdentificationNumber": "27DKKPS2852A1ZM"
+                                            },
                                         },
-                                    ],
+                                        "productDetails": [
+                                            {
+                                                "productUniqueId": "",
+                                                "productName": "PRODUCT_NAME",
+                                                "productValue": "productValue",
+                                                "productDescription": "Tops and T-shirts",
+                                                "productCategory": "Clothes & Shoes",
+                                                "productQuantity": "1",
+                                                "tax": [
+                                                    {
+                                                        "taxType": "CGST1",
+                                                        "taxValue": 0,
+                                                        "taxPercentage": 0,
+                                                    },
+                                                    {
+                                                        "taxType": "IGST",
+                                                        "taxValue": 10,
+                                                        "taxPercentage": 0,
+                                                    },
+                                                    {
+                                                        "taxType": "SGST1",
+                                                        "taxValue": 0,
+                                                        "taxPercentage": 0,
+                                                    },
+                                                ],
+                                                "hsnCode": "",
+                                                "preTaxValue": 10,
+                                                "discount": 0,
+                                                "qcDetails": {
+                                                    "isQualityCheck": True,
+                                                    "qcTemplateDetails": {
+                                                        "templateId": None,
+                                                        "templateCategory": None,
+                                                    },
+                                                    "textCapture": [
+                                                        {
+                                                            "label": None,
+                                                            "type": None,
+                                                            "valueToCheck": None,
+                                                        }
+                                                    ],
+                                                    "pickupProductImage": [
+                                                        {
+                                                            "ImageUrl": "http://cdn.fc/box/11521166a.jpg",
+                                                            "TextToShow": "Front Image",
+                                                        }
+                                                    ],
+                                                    "captureImageRule": {
+                                                        "minImage": 0,
+                                                        "maxImage": 0,
+                                                    },
+                                                    "nonQcRVPType": "OpenBox1",
+                                                },
+                                            },
+                                            {
+                                                "productUniqueId": "productUniqueId2",
+                                                "productName": "PRODUCT_NAME2",
+                                                "productValue": "productValue2",
+                                                "productDescription": "Tops and T-shirts2",
+                                                "productCategory": "Clothes & Shoes2",
+                                                "productQuantity": "1",
+                                                "tax": [
+                                                    {
+                                                        "taxType": "CGST1",
+                                                        "taxValue": 100,
+                                                        "taxPercentage": 12,
+                                                    },
+                                                    {
+                                                        "taxType": "IGST",
+                                                        "taxValue": 200,
+                                                        "taxPercentage": 15,
+                                                    },
+                                                    {
+                                                        "taxType": "SGST",
+                                                        "taxValue": 100,
+                                                        "taxPercentage": 10,
+                                                    },
+                                                ],
+                                                "hsnCode": "61091002",
+                                                "preTaxValue": 102,
+                                                "discount": 20,
+                                                "qcDetails": None,
+                                            },
+                                        ],
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                    "bufferAttribute": [],
+                    "shippingDetails": {
+                        "dropDetails": {
+                            "address": [
+                                {
+                                    "country": "Ind",
+                                    "countryType": "ISO2",
+                                    "name": "dropname0",
+                                    "addressLine": "dropaddressLine0",
+                                    "city": "LUHARI",
+                                    "stateCountry": "HARYANA",
+                                    "landmark": "",
+                                    "pincode": "110075",
+                                    "type": "PRIMARY",
                                 }
                             ],
-                        }
-                    ],
-                },
-                "bufferAttribute": [],
-                "shippingDetails": {
-                    "dropDetails": {
-                        "address": [
-                            {
-                                "country": "Ind",
-                                "countryType": "ISO2",
-                                "name": "dropname0",
-                                "addressLine": "dropaddressLine0",
-                                "city": "LUHARI",
-                                "stateCountry": "HARYANA",
-                                "landmark": "",
-                                "pincode": "110075",
-                                "type": "PRIMARY",
-                            }
-                        ],
-                        "contactDetails": [
-                            {
-                                "emailid": "",
-                                "type": "Primary",
-                                "contactNumber": "1234567890",
-                                "virtualNumber": None,
+                            "contactDetails": [
+                                {
+                                    "emailid": "",
+                                    "type": "Primary",
+                                    "contactNumber": "1234567890",
+                                    "virtualNumber": None,
+                                },
+                                {
+                                    "emailid": "dropSecondary1@gmail.com",
+                                    "type": "Secondary",
+                                    "contactNumber": "1234567891",
+                                    "virtualNumber": None,
+                                },
+                            ],
+                            "geoFencingInstruction": {
+                                "latitude": None,
+                                "longitude": None,
+                                "isGeoFencingEnabled": None,
                             },
-                            {
-                                "emailid": "dropSecondary1@gmail.com",
-                                "type": "Secondary",
-                                "contactNumber": "1234567891",
-                                "virtualNumber": None,
+                            "securityInstructions": {"securityCode": None},
+                        },
+                        "pickupDetails": {
+                            "address": [
+                                {
+                                    "country": "Ind",
+                                    "countryType": "ISO2",
+                                    "name": "Shazli",
+                                    "addressLine": "c48b0950f3bef",
+                                    "city": "Kanpur Nagar",
+                                    "stateCountry": "Uttar Pradesh",
+                                    "landmark": "",
+                                    "pincode": "110001",
+                                    "type": "Primary",
+                                },
+                                {
+                                    "country": "Ind",
+                                    "countryType": "ISO2",
+                                    "name": "Shazli2",
+                                    "addressLine": "c48b0950fc085ef",
+                                    "city": "Kanpur Nagar",
+                                    "stateCountry": "Uttar Pradesh",
+                                    "landmark": "",
+                                    "pincode": "110075",
+                                    "type": None,
+                                },
+                            ],
+                            "contactDetails": [
+                                {
+                                    "emailid": "",
+                                    "type": "Primary",
+                                    "contactNumber": "1234567890",
+                                    "virtualNumber": "",
+                                }
+                            ],
+                            "geoFencingInstruction": {
+                                "latitude": None,
+                                "longitude": None,
+                                "isGeoFencingEnabled": None,
                             },
-                        ],
-                        "geoFencingInstruction": {
-                            "latitude": None,
-                            "longitude": None,
-                            "isGeoFencingEnabled": None,
+                            "securityInstructions": {"securityCode": None},
                         },
-                        "securityInstructions": {"securityCode": None},
-                    },
-                    "pickupDetails": {
-                        "address": [
-                            {
-                                "country": "Ind",
-                                "countryType": "ISO2",
-                                "name": "Shazli",
-                                "addressLine": "c48b0950f3bef",
-                                "city": "Kanpur Nagar",
-                                "stateCountry": "Uttar Pradesh",
-                                "landmark": "",
-                                "pincode": "110001",
-                                "type": "Primary",
+                        "RTODetails": {
+                            "address": [
+                                {
+                                    "name": "RAKSHIT GOYAL",
+                                    "addressLine": "SCO 261 First Floor BASKET",
+                                    "landmark": "string",
+                                    "city": "PANCHKULA",
+                                    "stateCountry": "Tamil Nadu",
+                                    "pincode": 110075,
+                                    "countryType": "ISO2",
+                                    "country": "ind",
+                                    "type": "primary",
+                                }
+                            ],
+                            "contactDetails": [
+                                {
+                                    "contactNumberExt": 91,
+                                    "contactNumber": 9465637062,
+                                    "virtualNumber": 0,
+                                    "emailid": "e@gmail.com",
+                                    "type": "primary",
+                                }
+                            ],
+                            "customerTinDetails": {
+                                "taxIdentificationNumber": 1230,
+                                "taxIdentificationNumberType": "PERSONAL_NATIONAL",
+                                "usage": 0,
+                                "effictiveDate": None,
+                                "expirationDate": None,
                             },
-                            {
-                                "country": "Ind",
-                                "countryType": "ISO2",
-                                "name": "Shazli2",
-                                "addressLine": "c48b0950fc085ef",
-                                "city": "Kanpur Nagar",
-                                "stateCountry": "Uttar Pradesh",
-                                "landmark": "",
-                                "pincode": "110075",
-                                "type": None,
+                            "geoFencingInstruction": {
+                                "isGeoFencingEnabled": None,
+                                "latitude": 0,
+                                "longitude": 0,
                             },
-                        ],
-                        "contactDetails": [
-                            {
-                                "emailid": "",
-                                "type": "Primary",
-                                "contactNumber": "1234567890",
-                                "virtualNumber": "",
-                            }
-                        ],
-                        "geoFencingInstruction": {
-                            "latitude": None,
-                            "longitude": None,
-                            "isGeoFencingEnabled": None,
-                        },
-                        "securityInstructions": {"securityCode": None},
-                    },
-                    "RTODetails": {
-                        "address": [
-                            {
-                                "name": "RAKSHIT GOYAL",
-                                "addressLine": "SCO 261 First Floor BASKET",
-                                "landmark": "string",
-                                "city": "PANCHKULA",
-                                "stateCountry": "Tamil Nadu",
-                                "pincode": 110075,
-                                "countryType": "ISO2",
-                                "country": "ind",
-                                "type": "primary",
-                            }
-                        ],
-                        "contactDetails": [
-                            {
-                                "contactNumberExt": 91,
-                                "contactNumber": 9465637062,
-                                "virtualNumber": 0,
-                                "emailid": "e@gmail.com",
-                                "type": "primary",
-                            }
-                        ],
-                        "customerTinDetails": {
-                            "taxIdentificationNumber": 1230,
-                            "taxIdentificationNumberType": "PERSONAL_NATIONAL",
-                            "usage": 0,
-                            "effictiveDate": None,
-                            "expirationDate": None,
-                        },
-                        "geoFencingInstruction": {
-                            "isGeoFencingEnabled": None,
-                            "latitude": 0,
-                            "longitude": 0,
-                        },
-                        "securityInstructions": {
-                            "isGenSecurityCode": False,
-                            "securityCode": 0,
+                            "securityInstructions": {
+                                "isGenSecurityCode": False,
+                                "securityCode": 0,
+                            },
                         },
                     },
-                },
-            }
-            # print(body)
-            # print(2)
-            api_url = "https://stage-global-api.xbees.in/global/v1/serviceRequest"
-            headers = {"token": token["token"], "Content-Type": "application/json"}
-            response = requests.request("POST", api_url, headers=headers, json=body)
-            # print(3)
-            try:
+                }
+                async with httpx.AsyncClient() as client:
+                    response = await client.post(
+                        "https://stage-global-api.xbees.in/global/v1/serviceRequest",
+                        headers={
+                            "token": token["token"],
+                            "Content-Type": "application/json",
+                        },
+                        json=body,
+                    )
+                print("123***")
+
                 response_data = response.json()
-                print(response_data, "Expressbees")
-            except ValueError as e:
-                logger.error("Failed to parse JSON response: %s", e)
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                    message="Some error occurred while assigning AWB, please try again",
-                )
-            # If order creation failed at Xpressbees, return message
-            if response_data["code"] != 100:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message=response_data["message"],
-                )
 
-            # if order created successfully at Xpressbees
+                if response_data["code"] != 100:
+                    print("error in dev_create_order")
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.BAD_REQUEST,
+                        message=response_data["message"],
+                    )
 
-            print(
-                response_data["code"],
-                "<<Code section>>",
-                jsonable_encoder(delivery_partner),
-            )
-
-            if response_data["code"] == 100:
-
-                # print(5)
-                # update status
                 order.status = "booked"
                 order.sub_status = "booked"
                 order.courier_status = "BOOKED"
@@ -1684,10 +2103,10 @@ class Xpressbees:
 
                 order.action_history.append(new_activity)
                 db.add(order)
-                db.commit()
 
-                print("007")
-
+                db.add(order)
+                await db.commit()
+                print("456***")
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.OK,
                     status=True,
@@ -1697,42 +2116,8 @@ class Xpressbees:
                     },
                     message="AWB assigned successfully",
                 )
-
-            else:
-                logger.error(
-                    extra=context_user_data.get(),
-                    msg="Xpressbees Error is status is not OK: {}".format(
-                        str(response_data)
-                    ),
-                )
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message=response_data["data"],
-                )
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Xpressbees Error posting shipment: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while posting the shipment.",
-            )
-
-        except Exception as e:
-            # Log other unhandled exceptions
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Xpressbees Unhandled error: {}".format(str(e)),
-            )
-            # Return a general internal server error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
-            )
+        finally:
+            await db.close()
 
     @staticmethod
     def cancel_shipment(
@@ -2172,7 +2557,7 @@ class Xpressbees:
                             "orderNumber": "324324wdsfsd43538",
                             "awbNumber": "",
                             "subOrderNumber": "subOrderNumber",
-                            "customerPromiseDate": "14-11-2025 10:14:13",
+                            "customerPromiseDate": "22-11-2025 10:14:13",
                             "manifestId": "manifestId",
                             "collectableAmount": {"unit": "INR", "value": 299},
                             "declaredAmount": {"value": 51000, "unit": "INR"},
@@ -2187,7 +2572,7 @@ class Xpressbees:
                                 "priorityRemarks": "PRIORITY_REMARKS",
                                 "isPickupPriority": "1",
                                 "pickupInstruction": None,
-                                "pickupSlotsDate": "14-11-2025 10:14:13",
+                                "pickupSlotsDate": "22-11-2025 10:14:13",
                             },
                             "packageDetails": {
                                 "packageDimension": {

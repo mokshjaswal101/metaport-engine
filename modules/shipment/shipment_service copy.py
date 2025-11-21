@@ -19,8 +19,6 @@ from pydantic import BaseModel
 import math
 import asyncio
 import random
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from context_manager.context import build_request_context
 
@@ -394,118 +392,95 @@ class ShipmentService:
         return pdf_buffer
 
     @staticmethod
-    async def calculate_shipping_zone(
+    def calculate_shipping_zone(
         pickup_pincode: int, destination_pincode: int
     ) -> GenericResponseModel:
-        """
-        Calculate the shipping zone based on pickup and destination pincodes.
-        Zones:
-            A -> Same city
-            B -> Same state
-            C -> Metro to Metro
-            E -> Special Zones
-            D -> Default
-        """
+
         try:
-            print("Welcome to zone calculation")
 
-            # Ensure pincodes are integers
-            pickup_pincode = int(pickup_pincode)
-            destination_pincode = int(destination_pincode)
+            db = get_db_session()
 
-            async with get_db_session() as db:
+            # fetch the city,state details for the pickup and destination pincodes
 
-                # Fetch pickup location
-                stmt_pickup = select(Pincode_Mapping).where(
-                    Pincode_Mapping.pincode == pickup_pincode
-                )
-                result_pickup = await db.execute(stmt_pickup)
-                pickup_location = result_pickup.scalar_one_or_none()
+            pickup_location = (
+                db.query(Pincode_Mapping)
+                .filter(Pincode_Mapping.pincode == pickup_pincode)
+                .first()
+            )
+            destination_location = (
+                db.query(Pincode_Mapping)
+                .filter(Pincode_Mapping.pincode == destination_pincode)
+                .first()
+            )
 
-                # Fetch destination location
-                stmt_dest = select(Pincode_Mapping).where(
-                    Pincode_Mapping.pincode == destination_pincode
-                )
-                result_dest = await db.execute(stmt_dest)
-                destination_location = result_dest.scalar_one_or_none()
-
-                # If either location not found, default to D
-                if not pickup_location or not destination_location:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={"zone": "D"},
-                        message="Successful",
-                    )
-
-                # A Zone -> Same city
-                if pickup_location.city.lower() == destination_location.city.lower():
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={"zone": "A"},
-                        message="Successful",
-                    )
-
-                # B Zone -> Same state
-                if pickup_location.state.lower() == destination_location.state.lower():
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={"zone": "B"},
-                        message="Successful",
-                    )
-
-                # E Zone -> Special Zones
-                if (
-                    pickup_location.state.lower() in special_zone
-                    or destination_location.state.lower() in special_zone
-                ):
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={"zone": "E"},
-                        message="Successful",
-                    )
-
-                # C Zone -> Metro to Metro
-                if (
-                    pickup_location.city.lower() in metro_cities
-                    and destination_location.city.lower() in metro_cities
-                ):
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={"zone": "C"},
-                        message="Successful",
-                    )
-
-                # Default zone
+            if not pickup_location or not destination_location:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.OK,
                     status=True,
                     data={"zone": "D"},
-                    message="Successful",
+                    message="Successfull",
                 )
 
+            # For A Zone -> Same city
+            if pickup_location.city.lower() == destination_location.city.lower():
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.OK,
+                    status=True,
+                    data={"zone": "A"},
+                    message="Successfull",
+                )
+
+            # For B Zone -> Same state
+            if pickup_location.state.lower() == destination_location.state.lower():
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.OK,
+                    status=True,
+                    data={"zone": "B"},
+                    message="Successfull",
+                )
+
+            # For E Zone -> Special Zones
+            if (
+                pickup_location.state.lower() in special_zone
+                or destination_location.state.lower() in special_zone
+            ):
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.OK,
+                    status=True,
+                    data={"zone": "E"},
+                    message="Successfull",
+                )
+
+            # For C Zone -> Metro to Metro
+            if (
+                pickup_location.city.lower() in metro_cities
+                and destination_location.city.lower() in metro_cities
+            ):
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.OK,
+                    status=True,
+                    data={"zone": "C"},
+                    message="Successfull",
+                )
+
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.OK,
+                status=True,
+                data={"zone": "D"},
+                message="Successfull",
+            )
+
         except DatabaseError as e:
+            # Log database error
             logger.error(
                 extra=context_user_data.get(),
-                msg=f"Could not calculate zone: {e}",
+                msg="could not calculate zone: {}".format(str(e)),
             )
+
+            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Could not calculate zone",
-            )
-
-        except Exception as e:
-            logger.error(
-                extra=context_user_data.get(),
-                msg=f"Unhandled error in zone calculation: {e}",
-            )
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred while calculating zone",
             )
 
     @staticmethod
@@ -1196,22 +1171,20 @@ class ShipmentService:
         }
 
     @staticmethod
-    async def assign_awb(
+    def assign_awb(
         shipment_params: CreateShipmentModel,
     ):
-        db = None
+
         try:
             order_id = shipment_params.order_id
             courier_id = shipment_params.contract_id
             client_id = context_user_data.get().client_id
-            db: AsyncSession = get_db_session()
-            # Fetch order
-            result = await db.execute(
-                select(Order).where(
-                    Order.client_id == client_id, Order.order_id == order_id
-                )
+            db = get_db_session()
+            order = (
+                db.query(Order)
+                .filter(Order.client_id == client_id, Order.order_id == order_id)
+                .first()
             )
-            order = result.scalars().first()
             if order.status != "new":
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.CONFLICT,
@@ -1222,84 +1195,124 @@ class ShipmentService:
                     },
                     message="AWB already assigned",
                 )
-            # Fetch client contract
             query = (
-                select(New_Company_To_Client_Rate)
+                db.query(New_Company_To_Client_Rate)
+                .filter(
+                    New_Company_To_Client_Rate.id == courier_id,
+                    New_Company_To_Client_Rate.client_id == client_id,
+                    New_Company_To_Client_Rate.isActive == True,
+                )
                 .options(
                     joinedload(New_Company_To_Client_Rate.client_contract).joinedload(
                         Client_Contract.shipping_partner
                     )
                 )
-                .where(
-                    New_Company_To_Client_Rate.id == courier_id,
-                    New_Company_To_Client_Rate.client_id == client_id,
-                    New_Company_To_Client_Rate.isActive == True,
-                )
             )
-            # Debug SQL
-            compiled_query = query.compile(
+            # Print SQL with bound values substituted
+            compiled_query = query.statement.compile(
                 dialect=postgresql.dialect(), compile_kwargs={"literal_binds": True}
             )
             print("\n=== Generated SQL Query ===\n")
             print(compiled_query)
             print("\n===========================\n")
-            result = await db.execute(query)
-            client_contract = result.scalars().first()
+            client_contract = query.first()
             if client_contract is None:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.NOT_FOUND,
                     message="Invalid Courier Id",
                 )
-            # ➤ calculate freight (converted function must be async)
-            freight = await ServiceabilityService.calculate_freight(
+            freight = ServiceabilityService.calculate_freight(
                 order_id=order_id,
                 min_chargeable_weight=0.5,
                 additional_weight_bracket=0.5,
                 contract_id=courier_id,
                 contract_data=ShipmentService.model_to_dict(client_contract),
+                # contract_data=client_contract,
             )
             print(">>>>")
             print(jsonable_encoder(freight))
             print("<<<<")
-            # check wallet balance (sync → wrap)
-            has_sufficient_balance = await WalletService.check_sufficient_balance(
+            # total_freight = (
+            #     freight["freight"] + freight["cod_charges"] + freight["tax_amount"]
+            # )
+            # check if the wallet has sufficient balance or not
+            has_sufficient_balance = WalletService.check_sufficient_balance(
                 PER_ORDER_CHARGE
             )
+
+            # if the wallet does not have sufficient balance, throw error
             if has_sufficient_balance.status == False:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message=has_sufficient_balance.message,
                 )
+            # print(client_contract.client_contract.shipping_partner.slug, "Slug")
             shipping_partner_slug = (
                 client_contract.client_contract.shipping_partner.slug
             )
-            # Development override
-            shipping_partner_slug = "xpressbees"
+
+            shipping_partner_slug = "xpressbees"  # FOR DEVELOPMENT MODE ONLY
             shipping_partner = courier_service_mapping[shipping_partner_slug]
-            # external API call (sync → wrap in thread)
+            # FOR DEVELOPMENT START>
             if shipping_partner_slug == "xpressbees":
-                shipment_response = await shipping_partner.dev_create_order(
+                shipment_response = shipping_partner.dev_create_order(
                     order,
                     client_contract.client_contract.credentials,
                     client_contract.client_contract.shipping_partner,
                 )
+            # FOR DEVELOPMENT <END
 
+            # if shipping_partner_slug == "logistify":
+            #     # store the freight data in db
+            #     order.forward_freight = freight["freight"]
+            #     order.forward_cod_charge = freight["cod_charges"]
+            #     order.forward_tax = freight["tax_amount"]
+
+            #     db.add(order)
+            #     db.commit()
+
+            # if shipping_partner_slug == "ekart":
+
+            #     shipment_response = shipping_partner.create_order(
+            #         order,
+            #         client_contract.client_contract.credentials,
+            #         client_contract.aggregator_courier,
+            #         client_contract.company_contract,
+            #     )
+
+            # else:
+            #     shipment_response = shipping_partner.create_order(
+            #         order,
+            #         client_contract.client_contract.credentials,
+            #         client_contract.client_contract.aggregator_courier,
+            #     )
+
+            # if the shipment is created successfully, i.e, the awb is assigned, deduct from wallet
             if shipment_response.status == True:
+
                 order.booking_date = datetime.now(timezone.utc)
                 order.shipment_booking_error = None
+
+                # ShippingNotificaitions.send_notification(order, "order_shipped")
+
                 if order.source == "shopify":
-                    await asyncio.to_thread(
-                        Shopify.update_order_fulfillment_status,
+                    Shopify.update_order_fulfillment_status(
                         order_id=order.marketplace_order_id,
                         awb_number=order.awb_number,
                         store_id=order.store_id,
                     )
-                is_processing = shipment_response.data.get("processing")
-                # store freight
+
+                is_processing = shipment_response.data.get("processing", None)
+
+                order.booking_date = datetime.now(timezone.utc)
+
+                # store the freight data in db
                 order.forward_freight = freight["freight"]
                 order.forward_cod_charge = freight["cod_charges"]
                 order.forward_tax = freight["tax_amount"]
+
                 db.add(order)
+
                 if is_processing:
                     return GenericResponseModel(
                         status_code=http.HTTPStatus.OK,
@@ -1307,17 +1320,17 @@ class ShipmentService:
                         message="Orders are being processed",
                     )
 
-                await asyncio.to_thread(
-                    WalletService.deduct_money,
-                    PER_ORDER_CHARGE,
-                    shipment_response.data["awb_number"],
+                WalletService.deduct_money(
+                    PER_ORDER_CHARGE, shipment_response.data["awb_number"]
                 )
 
+                # if the payment of the order is COD, add the cod amount to the provisional COD in wallet
                 if order.payment_mode.lower() == "cod":
-                    await asyncio.to_thread(
-                        WalletService.add_provisional_cod, order.total_amount
-                    )
-                await db.flush()
+                    WalletService.add_provisional_cod(order.total_amount)
+
+                db.flush()
+
+            # if the shipment is not created successfully, i.e, the awb is not assigned, store the error message in db
             if shipment_response.status == False:
                 order.shipment_booking_error = (
                     client_contract.client_contract.slug
@@ -1325,32 +1338,40 @@ class ShipmentService:
                     + shipment_response.message
                 )
                 db.add(order)
-                await db.flush()
-            await db.commit()
+                db.flush()
+
+            db.commit()
+
             return shipment_response
+
         except DatabaseError as e:
+            # Log database error
             logger.error(
                 extra=context_user_data.get(),
                 msg="Error posting shipment: {}".format(str(e)),
             )
+
+            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An error occurred while posting the shipment.",
             )
 
         except Exception as e:
+            # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
                 msg="Unhandled error: {}".format(str(e)),
             )
+            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
             )
 
         finally:
-            if db:
-                await db.close()
+            if db.is_active:
+                db.close()
 
     @staticmethod
     def dev_assign_awb(courier_id: int, order: Order_Model):
@@ -3395,51 +3416,40 @@ class ShipmentService:
             )
 
     @staticmethod
-    async def download_manifest(order_ids: List[str]):
+    def download_manifest(order_ids: List[str]):
         try:
-            db: AsyncSession = get_db_session()
 
-            client_id = context_user_data.get().client_id
+            with get_db_session() as db:
 
-            # Build async query
-            query = (
-                select(Order)
-                .where(Order.order_id.in_(order_ids), Order.client_id == client_id)
-                .order_by(desc(Order.created_at))
-                .options(joinedload(Order.pickup_location))
-            )
+                client_id = context_user_data.get().client_id
 
-            # Execute async query
-            result = await db.execute(query)
-            orders = result.scalars().all()
+                # fetch the order details from the order
+                orders = (
+                    db.query(Order)
+                    .filter(Order.order_id.in_(order_ids), Order.client_id == client_id)
+                    .order_by(desc(Order.created_at))
+                    .options(joinedload(Order.pickup_location))
+                )
 
-            # --- PDF Generation ---
-            manifest_html = generate_manifest(orders)
-            pdf_buffer = ShipmentService.convert_html_to_pdf(manifest_html)
+                manifest_html = generate_manifest(orders)
+                pdf_buffer = ShipmentService.convert_html_to_pdf(manifest_html)
 
-            pdf_buffer.seek(0)
+                pdf_buffer.seek(0)
 
-            # Return base64 encoded PDF
-            return base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
+                # Return the PDF as a downloadable file
+                return base64.b64encode(pdf_buffer.getvalue()).decode("utf-8")
 
         except DatabaseError as e:
+            # Log database error
             logger.error(
                 extra=context_user_data.get(),
-                msg=f"Manifest DB error: {str(e)}",
-            )
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="Could not generate manifest",
+                msg="could not calculate zone: {}".format(str(e)),
             )
 
-        except Exception as e:
-            logger.error(
-                extra=context_user_data.get(),
-                msg=f"Manifest error: {str(e)}",
-            )
+            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="Manifest generation failed",
+                message="Could not calculate zone",
             )
 
     @staticmethod

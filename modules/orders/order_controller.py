@@ -42,7 +42,8 @@ async def create_order(
     order_data: Order_create_request_model,
 ):
     try:
-        response: GenericResponseModel = OrderService.create_order(
+        # Await the async service method
+        response: GenericResponseModel = await OrderService.create_order(
             order_data=order_data
         )
         return build_api_response(response)
@@ -125,6 +126,28 @@ async def create_order():
 
 
 # Edit order
+# @order_router.post(
+#     "/update/{order_id}",
+#     status_code=http.HTTPStatus.CREATED,
+#     response_model=GenericResponseModel,
+# )
+# async def update_order(order_id: str, order_data: Order_create_request_model):
+#     try:
+#         response: GenericResponseModel = OrderService.update_order(
+#             order_id=order_id, order_data=order_data
+#         )
+#         return build_api_response(response)
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while creating the order.",
+#             )
+#         )
+
+
 @order_router.post(
     "/update/{order_id}",
     status_code=http.HTTPStatus.CREATED,
@@ -132,7 +155,7 @@ async def create_order():
 )
 async def update_order(order_id: str, order_data: Order_create_request_model):
     try:
-        response: GenericResponseModel = OrderService.update_order(
+        response: GenericResponseModel = await OrderService.update_order(
             order_id=order_id, order_data=order_data
         )
         return build_api_response(response)
@@ -169,6 +192,34 @@ async def get_customers(phone: str):
         )
 
 
+# @order_router.get(
+#     "/previous-orders/{order_id}",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def get_previous_orders(
+#     order_id: str, page_number: int = 1, batch_size: int = 10
+# ):
+#     """
+#     Get previous orders for the same phone number as the given order ID with pagination
+#     """
+
+#     try:
+#         response: GenericResponseModel = OrderService.get_previous_orders(
+#             order_id=order_id, page_number=page_number, batch_size=batch_size
+#         )
+#         return build_api_response(response)
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while fetching previous orders.",
+#             )
+#         )
+
+
 @order_router.get(
     "/previous-orders/{order_id}",
     status_code=http.HTTPStatus.OK,
@@ -177,12 +228,8 @@ async def get_customers(phone: str):
 async def get_previous_orders(
     order_id: str, page_number: int = 1, batch_size: int = 10
 ):
-    """
-    Get previous orders for the same phone number as the given order ID with pagination
-    """
-
     try:
-        response: GenericResponseModel = OrderService.get_previous_orders(
+        response: GenericResponseModel = await OrderService.get_previous_orders(
             order_id=order_id, page_number=page_number, batch_size=batch_size
         )
         return build_api_response(response)
@@ -197,15 +244,38 @@ async def get_previous_orders(
         )
 
 
-# Edit order
+# # Edit order
+# @order_router.delete(
+#     "/delete/{order_id}",
+#     status_code=http.HTTPStatus.CREATED,
+#     response_model=GenericResponseModel,
+# )
+# async def update_order(order_id: str):
+#     try:
+#         response: GenericResponseModel = OrderService.delete_order(order_id=order_id)
+#         return build_api_response(response)
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while creating the order.",
+#             )
+#         )
+
+
+# Delete order
 @order_router.delete(
     "/delete/{order_id}",
-    status_code=http.HTTPStatus.CREATED,
+    status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
-async def update_order(order_id: str):
+async def delete_order(order_id: str):
     try:
-        response: GenericResponseModel = OrderService.delete_order(order_id=order_id)
+        response: GenericResponseModel = await OrderService.delete_order(
+            order_id=order_id
+        )
         return build_api_response(response)
 
     except Exception as e:
@@ -213,7 +283,8 @@ async def update_order(order_id: str):
             GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
-                message="An error occurred while creating the order.",
+                message="An error occurred while deleting the order.",
+                status=False,
             )
         )
 
@@ -264,6 +335,26 @@ async def create_order(order_id: str):
 
 
 # clone an order
+# @order_router.post(
+#     "/clone/{order_id}",
+#     status_code=http.HTTPStatus.CREATED,
+#     response_model=GenericResponseModel,
+# )
+# async def clone_order(order_id: str):
+#     try:
+#         response: GenericResponseModel = OrderService.clone_order(order_id=order_id)
+#         return build_api_response(response)
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while duplicating the order.",
+#             )
+#         )
+
+
 @order_router.post(
     "/clone/{order_id}",
     status_code=http.HTTPStatus.CREATED,
@@ -271,15 +362,14 @@ async def create_order(order_id: str):
 )
 async def clone_order(order_id: str):
     try:
-        response: GenericResponseModel = OrderService.clone_order(order_id=order_id)
+        response: GenericResponseModel = await OrderService.clone_order(order_id)
         return build_api_response(response)
-
     except Exception as e:
         return build_api_response(
             GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                data=str(e),
                 message="An error occurred while duplicating the order.",
+                data=str(e),
             )
         )
 
@@ -315,8 +405,8 @@ async def create_order(data: bulkCancelOrderModel):
 )
 async def get_all_orders(order_filters: Order_filters):
     try:
-
-        response: GenericResponseModel = OrderService.get_all_orders(
+        # await the async service function
+        response: GenericResponseModel = await OrderService.get_all_orders(
             order_filters=order_filters
         )
         return build_api_response(response)
@@ -331,6 +421,28 @@ async def get_all_orders(order_filters: Order_filters):
         )
 
 
+# # get all orders for a user
+# @order_router.post(
+#     "/export",
+#     status_code=http.HTTPStatus.CREATED,
+# )
+# async def export_orders(order_filters: Order_Export_Filters):
+#     try:
+#         response: GenericResponseModel = OrderService.export_orders(
+#             order_filters=order_filters
+#         )
+#         return response
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while export report.",
+#             )
+#         )
+
+
 # get all orders for a user
 @order_router.post(
     "/export",
@@ -338,7 +450,8 @@ async def get_all_orders(order_filters: Order_filters):
 )
 async def export_orders(order_filters: Order_Export_Filters):
     try:
-        response: GenericResponseModel = OrderService.export_orders(
+        # Await the async service call
+        response: GenericResponseModel = await OrderService.export_orders(
             order_filters=order_filters
         )
         return response
@@ -348,7 +461,7 @@ async def export_orders(order_filters: Order_Export_Filters):
             GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
-                message="An error occurred while export report.",
+                message="An error occurred while exporting report.",
             )
         )
 
@@ -498,12 +611,14 @@ async def get_bulk_upload_logs():
 # keep this at the bottom to avoid shadowing static routes
 @order_router.get(
     "/{order_id}",
-    status_code=http.HTTPStatus.CREATED,
+    status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
 async def get_order_by_id(order_id: str):
     try:
-        response: GenericResponseModel = OrderService.get_order_by_Id(order_id=order_id)
+        # MUST await service call
+        response: GenericResponseModel = await OrderService.get_order_by_Id(order_id)
+
         return build_api_response(response)
 
     except Exception as e:

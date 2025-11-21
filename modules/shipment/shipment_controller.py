@@ -50,6 +50,28 @@ async def create_order(pickup_pincode: int, destination_pincode: int):
 
 
 # create a new shipment
+# @shipment_router.post(
+#     "/assign-awb",
+#     status_code=http.HTTPStatus.CREATED,
+#     response_model=GenericResponseModel,
+# )
+# async def assign_awb(shipment_params: CreateShipmentModel):
+#     try:
+#         response: GenericResponseModel = ShipmentService.assign_awb(
+#             shipment_params=shipment_params
+#         )
+#         return build_api_response(response)
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while assigning awb.",
+#             )
+#         )
+
+
 @shipment_router.post(
     "/assign-awb",
     status_code=http.HTTPStatus.CREATED,
@@ -57,9 +79,7 @@ async def create_order(pickup_pincode: int, destination_pincode: int):
 )
 async def assign_awb(shipment_params: CreateShipmentModel):
     try:
-        response: GenericResponseModel = ShipmentService.assign_awb(
-            shipment_params=shipment_params
-        )
+        response = await ShipmentService.assign_awb(shipment_params=shipment_params)
         return build_api_response(response)
 
     except Exception as e:
@@ -210,10 +230,28 @@ async def cancel_shipments(cancel_shipment_request: CancelshipmentRequestSchema)
         )
 
 
+# @shipment_router.post("/download-manifest/", status_code=http.HTTPStatus.OK)
+# async def download_manifest(download_manifest_request: generateLabelRequest):
+#     try:
+#         response: GenericResponseModel = ShipmentService.download_manifest(
+#             order_ids=download_manifest_request.order_ids
+#         )
+#         return response
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while downloading manifest.",
+#             )
+#         )
+
+
 @shipment_router.post("/download-manifest/", status_code=http.HTTPStatus.OK)
 async def download_manifest(download_manifest_request: generateLabelRequest):
     try:
-        response: GenericResponseModel = ShipmentService.download_manifest(
+        response: GenericResponseModel = await ShipmentService.download_manifest(
             order_ids=download_manifest_request.order_ids
         )
         return response

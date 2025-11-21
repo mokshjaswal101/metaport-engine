@@ -5,6 +5,7 @@ import math
 from fastapi.encoders import jsonable_encoder
 import traceback
 from decimal import Decimal
+from sqlalchemy import select
 
 
 from context_manager.context import context_user_data, get_db_session
@@ -39,67 +40,54 @@ from data.courier_service_mapping import courier_service_mapping
 class ServiceabilityService:
 
     @staticmethod
-    def get_available_couriers(
+    async def get_available_couriers(
         serviceability_params: ServiceabilityParamsModel,
     ):
-
         try:
-            # print("Welcome i am first section")
             rate_type = serviceability_params.shipment_type
-            print(rate_type, "<<rate_type>>")
-
             user_data = context_user_data.get()
             client_id = user_data.client_id
-
             order_id = serviceability_params.order_id
-
-            with get_db_session() as db:
-                fetched_contracts = (
-                    db.query(New_Company_To_Client_Rate)
-                    .filter(
+            async with get_db_session() as db:
+                stmt = (
+                    select(New_Company_To_Client_Rate)
+                    .where(
                         New_Company_To_Client_Rate.client_id == client_id,
                         New_Company_To_Client_Rate.isActive == True,
                     )
                     .options(joinedload(New_Company_To_Client_Rate.shipping_partner))
-                    .all()
                 )
-
-                fetched_contracts = [
-                    jsonable_encoder(contract) for contract in fetched_contracts
-                ]
+                result = await db.execute(stmt)
+                fetched_contracts = result.scalars().all()
                 available_contracts = []
                 for contract in fetched_contracts:
-                    freight = ServiceabilityService.calculate_freight(
+                    contract_dict = jsonable_encoder(contract)
+                    freight = await ServiceabilityService.calculate_freight(
                         order_id=order_id,
                         min_chargeable_weight=0.5,
                         additional_weight_bracket=0.5,
-                        contract_id=contract["id"],
-                        contract_data=contract,
+                        contract_id=contract_dict["id"],
+                        contract_data=contract_dict,
                         rate_type=rate_type,
                     )
-                    # Create the contract object with the calculated freight
-                    contract_object = {
-                        "name": contract["shipping_partner"]["name"],
-                        "mode": contract["shipping_partner"]["mode"],
-                        "logo": contract["shipping_partner"]["logo"],
-                        "slug": contract["shipping_partner"]["slug"],
+                    contract_obj = {
+                        "name": contract_dict["shipping_partner"]["name"],
+                        "mode": contract_dict["shipping_partner"]["mode"],
+                        "logo": contract_dict["shipping_partner"]["logo"],
+                        "slug": contract_dict["shipping_partner"]["slug"],
                         "freight": freight["freight"],
-                        "courier_id": contract["id"],
+                        "courier_id": contract_dict["id"],
                         "cod_charges": freight["cod_charges"],
                         "tax_amount": freight["tax_amount"],
                         "chargeable_weight": freight["chargeable_weight"],
                         "min_chargeable_weight": 0.5,
                         "additional_weight_bracket": 0.5,
                     }
-                    # Add the contract object to the list
                     available_contracts.append(
-                        CourierServiceabilityResponseModel(**contract_object)
+                        CourierServiceabilityResponseModel(**contract_obj)
                     )
-
                 available_contracts.sort(
-                    key=lambda contract: contract.freight
-                    + contract.cod_charges
-                    + contract.tax_amount
+                    key=lambda c: c.freight + c.cod_charges + c.tax_amount
                 )
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.OK,
@@ -108,29 +96,10 @@ class ServiceabilityService:
                     message="Contracts fetched successfully",
                 )
 
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error getting available couriers: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while fetching the available couriers.",
-            )
-
         except Exception as e:
-            # Log other unhandled exceptions
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
-            )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
+                message=str(e),
             )
 
     @staticmethod
@@ -252,20 +221,73 @@ class ServiceabilityService:
                 message="An internal server error occurred. Please try again later.",
             )
 
+    # @staticmethod
+    # def get_pincode_details(
+    #     pincode: int,
+    # ):
+    #     try:
+    #         with get_db_session() as db:
+    #             pincode_data = (
+    #                 db.query(Pincode_Mapping)
+    #                 .filter(Pincode_Mapping.pincode == pincode)
+    #                 .first()
+    #             )
+
+    #             if not pincode_data:
+    #                 return GenericResponseModel(
+    #                     status_code=http.HTTPStatus.NOT_FOUND,
+    #                     status=False,
+    #                     message="Pincode not found",
+    #                 )
+
+    #             # create the response data for the pincode details
+    #             response_data = {
+    #                 "pincode": pincode,
+    #                 "city": pincode_data.city,
+    #                 "state": pincode_data.state,
+    #                 "country": "India",
+    #             }
+
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.OK,
+    #                 status=True,
+    #                 data=response_data,
+    #                 message="Pincode data fethced successfully",
+    #             )
+
+    #     except DatabaseError as e:
+    #         # Log database error
+    #         logger.error(
+    #             extra=context_user_data.get(),
+    #             msg="Error fetching pincode details: {}".format(str(e)),
+    #         )
+
+    #         # Return error response
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="Could not fetch pincode details",
+    #         )
+
+    #     except Exception as e:
+    #         # Log other unhandled exceptions
+    #         logger.error(
+    #             extra=context_user_data.get(),
+    #             msg="Error while fecthing pincode details: {}".format(str(e)),
+    #         )
+    #         # Return a general internal server error response
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="Could not fetch pincode details",
+    #         )
+
     @staticmethod
-    def get_pincode_details(
-        pincode: int,
-    ):
-
+    async def get_pincode_details(pincode: int) -> GenericResponseModel:
         try:
-
-            with get_db_session() as db:
-
-                pincode_data = (
-                    db.query(Pincode_Mapping)
-                    .filter(Pincode_Mapping.pincode == pincode)
-                    .first()
+            async with get_db_session() as db:  # async session
+                result = await db.execute(
+                    select(Pincode_Mapping).where(Pincode_Mapping.pincode == pincode)
                 )
+                pincode_data = result.scalar_one_or_none()
 
                 if not pincode_data:
                     return GenericResponseModel(
@@ -286,13 +308,14 @@ class ServiceabilityService:
                     status_code=http.HTTPStatus.OK,
                     status=True,
                     data=response_data,
-                    message="Pincode data fethced successfully",
+                    message="Pincode data fetched successfully",
                 )
 
         except DatabaseError as e:
             # Log database error
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
+                extra=user_data.model_dump() if user_data else {},
                 msg="Error fetching pincode details: {}".format(str(e)),
             )
 
@@ -304,9 +327,10 @@ class ServiceabilityService:
 
         except Exception as e:
             # Log other unhandled exceptions
+            user_data = context_user_data.get()
             logger.error(
-                extra=context_user_data.get(),
-                msg="Error while fecthing pincode details: {}".format(str(e)),
+                extra=user_data.model_dump() if user_data else {},
+                msg="Error while fetching pincode details: {}".format(str(e)),
             )
             # Return a general internal server error response
             return GenericResponseModel(
@@ -315,7 +339,7 @@ class ServiceabilityService:
             )
 
     @staticmethod
-    def calculate_freight(
+    async def calculate_freight(
         order_id: str,
         min_chargeable_weight: float,
         additional_weight_bracket: float,
@@ -326,24 +350,22 @@ class ServiceabilityService:
 
         try:
             client_id = context_user_data.get().client_id
-            with get_db_session() as db:
+
+            async with get_db_session() as db:
+
                 if rate_type == "reverse":
-                    order_data = (
-                        db.query(Return_Order)
-                        .filter(
-                            Return_Order.client_id == client_id,
-                            Return_Order.order_id == order_id,
-                        )
-                        .first()
+                    stmt = select(Return_Order).where(
+                        Return_Order.client_id == client_id,
+                        Return_Order.order_id == order_id,
                     )
                 else:
-                    order_data = (
-                        db.query(Order)
-                        .filter(
-                            Order.client_id == client_id, Order.order_id == order_id
-                        )
-                        .first()
+                    stmt = select(Order).where(
+                        Order.client_id == client_id,
+                        Order.order_id == order_id,
                     )
+
+                result = await db.execute(stmt)
+                order_data = result.scalars().first()
 
                 if not order_data:
                     return GenericResponseModel(
@@ -356,53 +378,44 @@ class ServiceabilityService:
                 if applicable_weight < min_chargeable_weight:
                     applicable_weight = min_chargeable_weight
 
-                zone = order_data.zone or "D"
+                zone = (order_data.zone or "D").lower()
                 order_value = order_data.order_value
-                payment_mode = order_data.payment_mode
+                payment_mode = order_data.payment_mode.lower()
 
-                # Ensure the additional weight is only calculated if applicable_weight exceeds the minimum chargeable weight
+                # ---- Weight Logic ----
                 if float(applicable_weight) > float(min_chargeable_weight):
-                    # weight that is above the min chargeable weight
                     additional_weight = float(applicable_weight) - float(
                         min_chargeable_weight
                     )
 
-                    # Calculate how many additional weight brackets need to be charged
                     additional_bracket_count = math.ceil(
                         float(additional_weight) / float(additional_weight_bracket)
                     )
 
-                    # Calculate the total chargeable weight
                     chargeable_weight = min_chargeable_weight + (
                         additional_weight_bracket * additional_bracket_count
                     )
                 else:
-                    # If applicable_weight is less than or equal to min_chargeable_weight, chargeable weight is the minimum
                     chargeable_weight = min_chargeable_weight
                     additional_bracket_count = 0
-                zone = zone.lower()  # normalize to lowercase like "zone_a"
+
                 base_rate_key = f"base_rate_zone_{zone}"
                 additional_rate_key = f"additional_rate_zone_{zone}"
 
-                base_rate = contract_data.get(base_rate_key, 0)
-                additional_rate = contract_data.get(additional_rate_key, 0)
-                # for min chargeable weight
-                base_freight = float(base_rate)
+                base_rate = float(contract_data.get(base_rate_key, 0))
+                additional_rate = float(contract_data.get(additional_rate_key, 0))
 
-                # for weight above the min chargeable weight
-                additional_freight = float(additional_rate) * additional_bracket_count
-
+                # Freight Calculation
+                base_freight = base_rate
+                additional_freight = additional_rate * additional_bracket_count
                 freight = base_freight + additional_freight
 
-                # in case of COD orders, COD charge is also applicable
-                # COD charge is calculated on the order value
-
+                # COD CHARGES
                 COD_freight = 0
-
-                if payment_mode.lower() == "cod":
+                if payment_mode == "cod":
                     absolute_rate = Decimal(contract_data.get("absolute_rate", 0))
                     percentage_rate = Decimal(contract_data.get("percentage_rate", 0))
-                    # cod charge is the maximum of the two values
+
                     COD_freight = float(
                         max(
                             absolute_rate,
@@ -410,6 +423,7 @@ class ServiceabilityService:
                             * Decimal("0.01"),
                         )
                     )
+
                 total_freight = freight + COD_freight
                 tax = round(total_freight * 0.18, 2)
 
@@ -420,29 +434,14 @@ class ServiceabilityService:
                 "chargeable_weight": chargeable_weight,
             }
 
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error calculating freight: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while calculating the freight.",
-            )
-
         except Exception as e:
-            # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
+                msg="Freight error: {}".format(str(e)),
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
+                message=str(e),
             )
 
     @staticmethod

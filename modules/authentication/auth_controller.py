@@ -25,10 +25,9 @@ async def login_user(
     user_login_data: UserLoginModel,
     _=Depends(build_request_context),
 ):
-    response: GenericResponseModel = AuthService.login_user(
+    response: GenericResponseModel = await AuthService.login_user(
         user_login_data=user_login_data
     )
-
     return build_api_response(response)
 
 
@@ -40,8 +39,7 @@ async def login_user(
     client_data: UserRegisterModel,
     _=Depends(build_request_context),
 ):
-    response: GenericResponseModel = AuthService.signup(client_data=client_data)
-
+    response: GenericResponseModel = await AuthService.signup(client_data=client_data)
     return build_api_response(response)
 
 

@@ -1,6 +1,7 @@
-from sqlalchemy import Column, String, Integer, ForeignKey
+from sqlalchemy import Column, String, Integer, ForeignKey, select, and_
 from sqlalchemy.orm import Session, relationship
 from sqlalchemy.dialects.postgresql import JSON
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 
 from database import DBBaseClass, DBBase
 
@@ -22,7 +23,7 @@ class User(DBBase, DBBaseClass):
 
     company = relationship("Company", back_populates="users")
     client = relationship("Client", back_populates="users")
-    
+
     extra_credentials = Column(String, nullable=True)
 
     def __to_model(self):
@@ -37,13 +38,22 @@ class User(DBBase, DBBaseClass):
         entity.pop("password")
         return User(**entity)
 
+    # @classmethod
+    # def create_user(cls, user):
+    #     from context_manager.context import get_db_session
+
+    #     db: Session = get_db_session()
+    #     db.add(user)
+    #     db.flush()
+
+    #     return user.__to_model()
     @classmethod
-    def create_user(cls, user):
+    async def create_user(cls, user):
         from context_manager.context import get_db_session
 
-        db: Session = get_db_session()
+        db: AsyncSession = get_db_session()  # async session
         db.add(user)
-        db.flush()
+        await db.flush()  # ✅ await the coroutine
 
         return user.__to_model()
 
@@ -57,21 +67,50 @@ class User(DBBase, DBBaseClass):
         user = super().get_by_uuid(uuid)
         return user.__to_model() if user else None
 
+    # @classmethod
+    # def get_active_user_by_email(cls, email):
+    #     from context_manager.context import get_db_session
+
+    #     db = get_db_session()
+    #     user = (
+    #         db.query(cls)
+    #         .filter(
+    #             cls.status == "active",
+    #             cls.email == email,
+    #             cls.is_deleted.is_(False),
+    #         )
+    #         .first()
+    #     )
+
+    #     return user.__to_model() if user else None
+    # @classmethod
+    # async def get_active_user_by_email(cls, email: str):
+    #     from context_manager.context import get_db_session
+
+    #     db: AsyncSession = get_db_session()  # do NOT await
+    #     if not db:
+    #         raise Exception("DB session is not initialized in context!")
+    #     result = await db.execute(
+    #         cls.__table__.select().where(
+    #             cls.status == "active", cls.email == email, cls.is_deleted.is_(False)
+    #         )
+    #     )
+    #     user = result.scalars().first()
+    #     return user.__to_model() if user else None
     @classmethod
-    def get_active_user_by_email(cls, email):
+    async def get_active_user_by_email(cls, email: str):
         from context_manager.context import get_db_session
 
-        db = get_db_session()
-        user = (
-            db.query(cls)
-            .filter(
-                cls.status == "active",
-                cls.email == email,
-                cls.is_deleted.is_(False),
-            )
-            .first()
+        db: AsyncSession = get_db_session()  # AsyncSession from context
+        if not db:
+            raise Exception("DB session is not initialized in context!")
+
+        stmt = select(cls).where(
+            and_(cls.status == "active", cls.email == email, cls.is_deleted.is_(False))
         )
 
+        result = await db.execute(stmt)
+        user = result.scalars().first()  # ORM instance, not string
         return user.__to_model() if user else None
 
     @classmethod

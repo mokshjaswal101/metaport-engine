@@ -18,14 +18,36 @@ notifications_router = APIRouter(
 )
 
 
+# @notifications_router.get(
+#     "/balance",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def get_notifications_balance():
+#     response: GenericResponseModel = ShippingNotificaitions.get_notifications_balance()
+#     return build_api_response(response)
+
+
 @notifications_router.get(
     "/balance",
     status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
 async def get_notifications_balance():
-    response: GenericResponseModel = ShippingNotificaitions.get_notifications_balance()
+    response: GenericResponseModel = (
+        await ShippingNotificaitions.get_notifications_balance()
+    )
     return build_api_response(response)
+
+
+# @notifications_router.get(
+#     "/rates",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def get_notification_rates():
+#     response: GenericResponseModel = ShippingNotificaitions.get_notification_rates()
+#     return build_api_response(response)
 
 
 @notifications_router.get(
@@ -34,8 +56,34 @@ async def get_notifications_balance():
     response_model=GenericResponseModel,
 )
 async def get_notification_rates():
-    response: GenericResponseModel = ShippingNotificaitions.get_notification_rates()
+    response: GenericResponseModel = (
+        await ShippingNotificaitions.get_notification_rates()
+    )
     return build_api_response(response)
+
+
+# @notifications_router.get(
+#     "/setting",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def get_notification_setting():
+#     response: GenericResponseModel = ShippingNotificaitions.get_notifications_settings()
+#     return build_api_response(response)
+
+
+# @notifications_router.post(
+#     "/setting",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def update_shipping_notification_setting(
+#     settings: ShippingNotificationSettingBaseModel,
+# ):
+#     response: GenericResponseModel = (
+#         ShippingNotificaitions.update_notification_settings(settings=settings)
+#     )
+#     return build_api_response(response)
 
 
 @notifications_router.get(
@@ -44,7 +92,9 @@ async def get_notification_rates():
     response_model=GenericResponseModel,
 )
 async def get_notification_setting():
-    response: GenericResponseModel = ShippingNotificaitions.get_notifications_settings()
+    response: GenericResponseModel = (
+        await ShippingNotificaitions.get_notifications_settings()
+    )
     return build_api_response(response)
 
 
@@ -57,6 +107,6 @@ async def update_shipping_notification_setting(
     settings: ShippingNotificationSettingBaseModel,
 ):
     response: GenericResponseModel = (
-        ShippingNotificaitions.update_notification_settings(settings=settings)
+        await ShippingNotificaitions.update_notification_settings(settings=settings)
     )
     return build_api_response(response)

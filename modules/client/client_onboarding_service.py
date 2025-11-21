@@ -7,8 +7,9 @@ from fastapi import UploadFile, File
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy import DateTime
 from datetime import datetime, timedelta, timezone
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, update
 import random
-
 import uuid
 
 
@@ -33,7 +34,7 @@ from modules.client.client_schema import (
 
 
 AWS_ACCESS_KEY = os.environ.get("AWS_ACCESS_KEY")
-AWS_SECRET_KEY = os.environ.get("AWS_SECRET_KEY")  #
+AWS_SECRET_KEY = os.environ.get("AWS_SECRET_KEY")
 BUCKET_NAME = os.environ.get("BUCKET_NAME")
 REGION_NAME = os.environ.get("REGION_NAME")
 
@@ -48,59 +49,130 @@ s3_client = boto3.client(
 
 class ClientOnboardingService:
 
+    # @staticmethod
+    # def onboarding_setup(
+    #     onboarding_data: SignupwithOnboarding,
+    # ) -> GenericResponseModel:
+    #     try:
+    #         db = get_db_session()
+
+    #         logger.info(
+    #             msg="Payload with onboarding setup: {}".format(
+    #                 onboarding_data.model_dump()
+    #             ),
+    #         )
+
+    #         user_id = onboarding_data.onboarding_user_id
+    #         client_id = onboarding_data.client_id
+
+    #         # Check if onboarding already exists
+    #         existing = (
+    #             db.query(Client_Onboarding_Details)
+    #             .filter_by(onboarding_user_id=user_id)
+    #             .first()
+    #         )
+
+    #         if existing is None:
+
+    #             new_client_onboarding = Client_Onboarding_Details(
+    #                 client_id=client_id,
+    #                 onboarding_user_id=user_id,
+    #                 company_name=onboarding_data.company_name,
+    #                 phone_number=onboarding_data.phone_number,
+    #                 email=onboarding_data.email,
+    #                 is_stepper=2,
+    #             )
+
+    #             db.add(new_client_onboarding)
+    #             db.flush()
+
+    #             logger.info(
+    #                 msg=f"Created new onboarding setup for client_id: {client_id}",
+    #             )
+
+    #         else:
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.CONFLICT,
+    #                 status=False,
+    #                 message="Onboarding details already exist for this client",
+    #             )
+
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.CREATED,
+    #             status=True,
+    #             message="Onboarding setup completed successfully",
+    #         )
+
+    #     except Exception as e:
+    #         logger.error(
+    #             msg=f"Unexpected error during onboarding setup: {e}",
+    #         )
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="An internal server error occurred. Please try again later.",
+    #         )
     @staticmethod
-    def onboarding_setup(
+    async def onboarding_setup(
         onboarding_data: SignupwithOnboarding,
     ) -> GenericResponseModel:
         try:
-            db = get_db_session()
-
-            logger.info(
-                msg="Payload with onboarding setup: {}".format(
-                    onboarding_data.model_dump()
-                ),
-            )
-
-            user_id = onboarding_data.onboarding_user_id
-            client_id = onboarding_data.client_id
-
-            # Check if onboarding already exists
-            existing = (
-                db.query(Client_Onboarding_Details)
-                .filter_by(onboarding_user_id=user_id)
-                .first()
-            )
-
-            if existing is None:
-
-                new_client_onboarding = Client_Onboarding_Details(
-                    client_id=client_id,
-                    onboarding_user_id=user_id,
-                    company_name=onboarding_data.company_name,
-                    phone_number=onboarding_data.phone_number,
-                    email=onboarding_data.email,
-                    is_stepper=2,
-                )
-
-                db.add(new_client_onboarding)
-                db.flush()
-
+            async with get_db_session() as db:  # use async context manager
                 logger.info(
-                    msg=f"Created new onboarding setup for client_id: {client_id}",
+                    msg="Payload with onboarding setup: {}".format(
+                        onboarding_data.model_dump()
+                    ),
                 )
 
-            else:
+                user_id = onboarding_data.onboarding_user_id
+                client_id = onboarding_data.client_id
+
+                # Check if onboarding already exists
+                result = await db.execute(
+                    select(Client_Onboarding_Details).where(
+                        Client_Onboarding_Details.onboarding_user_id == user_id
+                    )
+                )
+                existing = result.scalar_one_or_none()
+                print(existing, "|||||<existing>|||||", user_id, client_id)
+
+                if existing is None:
+                    print("Creating new onboarding details**")
+
+                    # Convert phone_number to string to avoid asyncpg DataError
+                    phone_number = (
+                        str(onboarding_data.phone_number)
+                        if onboarding_data.phone_number is not None
+                        else None
+                    )
+
+                    new_client_onboarding = Client_Onboarding_Details(
+                        client_id=client_id,
+                        onboarding_user_id=user_id,
+                        company_name=onboarding_data.company_name,
+                        phone_number=phone_number,
+                        email=onboarding_data.email,
+                        is_stepper=2,
+                    )
+
+                    db.add(new_client_onboarding)
+                    await db.flush()  # flush to DB
+                    await db.commit()  # commit to persist
+
+                    logger.info(
+                        msg=f"Created new onboarding setup for client_id: {client_id}",
+                    )
+                else:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.CONFLICT,
+                        status=False,
+                        message="Onboarding details already exist for this client",
+                    )
+
                 return GenericResponseModel(
-                    status_code=http.HTTPStatus.CONFLICT,
-                    status=False,
-                    message="Onboarding details already exist for this client",
+                    status_code=http.HTTPStatus.CREATED,
+                    status=True,
+                    message="Onboarding setup completed successfully",
                 )
-
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.CREATED,
-                status=True,
-                message="Onboarding setup completed successfully",
-            )
 
         except Exception as e:
             logger.error(
@@ -112,17 +184,17 @@ class ClientOnboardingService:
             )
 
     @staticmethod
-    def otp_verified(otpVerified: OtpVerified):
+    async def otp_verified(otpVerified: OtpVerified) -> GenericResponseModel:
         try:
-            with get_db_session() as db:
-                # Get current logged-in user
+            async with get_db_session() as db:
                 client_id = context_user_data.get().client_id
-                # Get onboarding record
-                existing = (
-                    db.query(Client_Onboarding_Details)
-                    .filter_by(client_id=client_id)
-                    .first()
+
+                result = await db.execute(
+                    select(Client_Onboarding_Details).where(
+                        Client_Onboarding_Details.client_id == client_id
+                    )
                 )
+                existing = result.scalar_one_or_none()
 
                 if not existing:
                     return GenericResponseModel(
@@ -131,11 +203,8 @@ class ClientOnboardingService:
                         message="Onboarding details not found.",
                     )
 
-                # 1. Check OTP expired
-                # if (
-                #     existing.otp_expires_at
-                #     and existing.otp_expires_at < datetime.utcnow()
-                # ):
+                # 1. Check OTP expired (optional)
+                # if existing.otp_expires_at and existing.otp_expires_at < datetime.utcnow():
                 #     return GenericResponseModel(
                 #         status_code=http.HTTPStatus.GONE,
                 #         status=False,
@@ -155,8 +224,8 @@ class ClientOnboardingService:
 
                 # 3. Mark verified
                 existing.is_otp_verified = True
-                # existing.is_otp = ""
-                db.commit()
+                await db.flush()
+                await db.commit()
 
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.OK,
@@ -168,7 +237,7 @@ class ClientOnboardingService:
             user_data = context_user_data.get()
             logger.error(
                 extra=user_data.model_dump() if user_data else {},
-                msg="Database error during OTP verification: {}".format(str(e)),
+                msg=f"Database error during OTP verification: {e}",
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -179,7 +248,7 @@ class ClientOnboardingService:
             user_data = context_user_data.get()
             logger.error(
                 extra=user_data.model_dump() if user_data else {},
-                msg="Unexpected error during OTP verification: {}".format(str(e)),
+                msg=f"Unexpected error during OTP verification: {e}",
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -239,31 +308,115 @@ class ClientOnboardingService:
                 message="An internal server error occurred. Please try again later.",
             )
 
+    # @staticmethod
+    # def onboarding_create(
+    #     onboarding_form: OnBoardingForm,
+    # ) -> GenericResponseModel:
+    #     try:
+    #         print("welcome to  onboarding create**")
+    #         with get_db_session() as db:
+    #             user_data = context_user_data.get()
+    #             logger.info(
+    #                 extra=user_data.model_dump() if user_data else {},
+    #                 msg="Payload onboarding_create: {}".format(str(onboarding_form)),
+    #             )
+    #             print(onboarding_form.stepper, "|*|<stepper>|*|")
+
+    #             # Get client_id from context
+    #             client_id = context_user_data.get().client_id
+
+    #             # Get existing onboarding details for this client
+    #             onboarding_details = (
+    #                 db.query(Client_Onboarding_Details)
+    #                 .filter_by(client_id=client_id)
+    #                 .first()
+    #             )
+    #             if not onboarding_details.is_form_access:
+    #                 user_data = context_user_data.get()
+    #                 logger.warning(
+    #                     extra=user_data.model_dump() if user_data else {},
+    #                     msg=f"Form edit attempted for client_id: {client_id} but form access is disabled",
+    #                 )
+    #                 return GenericResponseModel(
+    #                     status_code=http.HTTPStatus.FORBIDDEN,
+    #                     status=False,
+    #                     message="Form editing is not allowed while verfication is in progress",
+    #                 )
+
+    #             # Handle different stepper stages
+    #             if onboarding_form.stepper == 2:
+    #                 ClientOnboardingService._handle_stepper_2(
+    #                     onboarding_details, onboarding_form
+    #                 )
+    #             elif onboarding_form.stepper == 3:
+    #                 ClientOnboardingService._handle_stepper_3(onboarding_details)
+    #             elif onboarding_form.stepper == 4:
+    #                 result = ClientOnboardingService._handle_stepper_4(
+    #                     onboarding_details
+    #                 )
+    #                 db.query(Client).filter(Client.id == client_id).update(
+    #                     {"is_onboarding_completed": True},  # or False
+    #                     synchronize_session=False,
+    #                 )
+
+    #                 if not isinstance(result, int):
+    #                     return result
+
+    #             db.commit()
+
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.CREATED,
+    #                 status=True,
+    #                 message="Onboarding step completed successfully",
+    #             )
+
+    #     except DatabaseError as e:
+    #         user_data = context_user_data.get()
+    #         logger.error(
+    #             extra=user_data.model_dump() if user_data else {},
+    #             msg="Database error during onboarding creation: {}".format(str(e)),
+    #         )
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="An error occurred while processing onboarding.",
+    #         )
+    #     except Exception as e:
+    #         user_data = context_user_data.get()
+    #         logger.error(
+    #             extra=user_data.model_dump() if user_data else {},
+    #             msg="Unexpected error during onboarding creation: {}".format(str(e)),
+    #         )
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="An internal server error occurred. Please try again later.",
+    #         )
+
     @staticmethod
-    def onboarding_create(
+    async def onboarding_create(
         onboarding_form: OnBoardingForm,
     ) -> GenericResponseModel:
         try:
-            print("welcome to  onboarding create**")
-            with get_db_session() as db:
+            print("welcome to onboarding create**")
+            async with get_db_session() as db:  # async context for AsyncSession
                 user_data = context_user_data.get()
                 logger.info(
                     extra=user_data.model_dump() if user_data else {},
-                    msg="Payload onboarding_create: {}".format(str(onboarding_form)),
+                    msg=f"Payload onboarding_create: {onboarding_form}",
                 )
                 print(onboarding_form.stepper, "|*|<stepper>|*|")
 
-                # Get client_id from context
-                client_id = context_user_data.get().client_id
+                client_id = user_data.client_id
 
-                # Get existing onboarding details for this client
-                onboarding_details = (
-                    db.query(Client_Onboarding_Details)
-                    .filter_by(client_id=client_id)
-                    .first()
+                # Fetch existing onboarding details
+                result = await db.execute(
+                    select(Client_Onboarding_Details).where(
+                        Client_Onboarding_Details.client_id == client_id
+                    )
                 )
+                onboarding_details = result.scalar_one_or_none()
+                print("123456789 onboarding_details:", onboarding_details)
+
                 if not onboarding_details.is_form_access:
-                    user_data = context_user_data.get()
                     logger.warning(
                         extra=user_data.model_dump() if user_data else {},
                         msg=f"Form edit attempted for client_id: {client_id} but form access is disabled",
@@ -271,29 +424,33 @@ class ClientOnboardingService:
                     return GenericResponseModel(
                         status_code=http.HTTPStatus.FORBIDDEN,
                         status=False,
-                        message="Form editing is not allowed while verfication is in progress",
+                        message="Form editing is not allowed while verification is in progress",
                     )
 
                 # Handle different stepper stages
                 if onboarding_form.stepper == 2:
-                    ClientOnboardingService._handle_stepper_2(
-                        onboarding_details, onboarding_form
+                    await ClientOnboardingService._handle_stepper_2(
+                        onboarding_details, onboarding_form, db
                     )
                 elif onboarding_form.stepper == 3:
-                    ClientOnboardingService._handle_stepper_3(onboarding_details)
-                elif onboarding_form.stepper == 4:
-                    result = ClientOnboardingService._handle_stepper_4(
-                        onboarding_details
+                    await ClientOnboardingService._handle_stepper_3(
+                        onboarding_details, db
                     )
-                    db.query(Client).filter(Client.id == client_id).update(
-                        {"is_onboarding_completed": True},  # or False
-                        synchronize_session=False,
+                elif onboarding_form.stepper == 4:
+                    result = await ClientOnboardingService._handle_stepper_4(
+                        onboarding_details, db
+                    )
+                    # Mark onboarding as completed
+                    await db.execute(
+                        update(Client)
+                        .where(Client.id == client_id)
+                        .values(is_onboarding_completed=True)
                     )
 
                     if not isinstance(result, int):
                         return result
 
-                db.commit()
+                await db.commit()  # Commit async changes
 
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.CREATED,
@@ -305,7 +462,7 @@ class ClientOnboardingService:
             user_data = context_user_data.get()
             logger.error(
                 extra=user_data.model_dump() if user_data else {},
-                msg="Database error during onboarding creation: {}".format(str(e)),
+                msg=f"Database error during onboarding creation: {str(e)}",
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -315,7 +472,7 @@ class ClientOnboardingService:
             user_data = context_user_data.get()
             logger.error(
                 extra=user_data.model_dump() if user_data else {},
-                msg="Unexpected error during onboarding creation: {}".format(str(e)),
+                msg=f"Unexpected error during onboarding creation: {str(e)}",
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -323,7 +480,7 @@ class ClientOnboardingService:
             )
 
     @staticmethod
-    def _handle_stepper_2(onboarding_details, onboarding_form):
+    async def _handle_stepper_2(onboarding_details, onboarding_form, db: AsyncSession):
         """Handle stepper 2: Company details"""
         user_data = context_user_data.get()
         logger.info(
@@ -331,18 +488,27 @@ class ClientOnboardingService:
             msg="Processing onboarding stepper 2",
         )
 
+        # Update fields
         onboarding_details.company_legal_name = onboarding_form.company_legal_name
         onboarding_details.company_name = onboarding_form.company_name
         onboarding_details.landmark = onboarding_form.landmark
-        onboarding_details.pincode = onboarding_form.pincode
+        onboarding_details.pincode = str(
+            onboarding_form.pincode
+        )  # ✅ convert to string
         onboarding_details.city = onboarding_form.city
         onboarding_details.office_address = onboarding_form.office_address
         onboarding_details.state = onboarding_form.state
         onboarding_details.country = onboarding_form.country
-        onboarding_details.phone_number = onboarding_form.phone_number
+        onboarding_details.phone_number = str(
+            onboarding_form.phone_number
+        )  # already string
         onboarding_details.email = onboarding_form.email
         onboarding_details.is_company_details = True
         onboarding_details.is_stepper = onboarding_form.stepper
+
+        # Persist changes to DB
+        db.add(onboarding_details)
+        await db.flush()  # async flush
 
     # @staticmethod
     # def _handle_stepper_3(onboarding_details, onboarding_form, db):
@@ -411,27 +577,46 @@ class ClientOnboardingService:
     #         )
     #         db.add(new_bank_details)
 
+    # @staticmethod
+    # def _handle_stepper_3(onboarding_details,db: AsyncSession):
+    #     """Handle stepper 3: Terms and review"""
+    #     user_data = context_user_data.get()
+    #     logger.info(
+    #         extra=user_data.model_dump() if user_data else {},
+    #         msg="Processing onboarding stepper 4",
+    #     )
+
+    #     onboarding_details.is_term = True
+    #     onboarding_details.is_stepper = 3
+    #     # if onboarding_details.is_otp is None:
+    #     # --- Generate and Save OTP ---
+    #     otp = str(random.randint(100000, 999999))  # Always 6 digits
+    #     onboarding_details.is_otp = otp  # Save OTP in DB
+    #     onboarding_details.otp_expires_at = datetime.now(timezone.utc) + timedelta(
+    #         minutes=5
+    #     )
+
     @staticmethod
-    def _handle_stepper_3(onboarding_details):
+    async def _handle_stepper_3(onboarding_details, db: AsyncSession):
         """Handle stepper 3: Terms and review"""
         user_data = context_user_data.get()
         logger.info(
             extra=user_data.model_dump() if user_data else {},
-            msg="Processing onboarding stepper 4",
+            msg="Processing onboarding stepper 3",
         )
-
         onboarding_details.is_term = True
         onboarding_details.is_stepper = 3
-        # if onboarding_details.is_otp is None:
-        # --- Generate and Save OTP ---
-        otp = str(random.randint(100000, 999999))  # Always 6 digits
-        onboarding_details.is_otp = otp  # Save OTP in DB
-        onboarding_details.otp_expires_at = datetime.now(timezone.utc) + timedelta(
-            minutes=5
-        )
+        # Generate OTP if not already set
+        otp = str(random.randint(100000, 999999))  # 6-digit OTP
+        onboarding_details.is_otp = otp
+        # Make datetime naive to match DB
+        onboarding_details.otp_expires_at = datetime.utcnow() + timedelta(minutes=5)
+        # Persist changes to DB
+        db.add(onboarding_details)
+        await db.flush()  # async flush
 
     @staticmethod
-    def _handle_stepper_4(onboarding_details):
+    async def _handle_stepper_4(onboarding_details, db: AsyncSession):
         """Handle stepper 4: Final submission"""
         user_data = context_user_data.get()
         logger.info(
@@ -439,8 +624,9 @@ class ClientOnboardingService:
             msg="Processing onboarding stepper 4 - Final submission",
         )
 
-        final_result = ClientOnboardingService.final_form_submission(
-            onboarding_details.id
+        # Await the async final_form_submission if it involves DB
+        final_result = await ClientOnboardingService.final_form_submission(
+            onboarding_details.id, db=db
         )
 
         if isinstance(final_result, int):
@@ -448,14 +634,15 @@ class ClientOnboardingService:
             onboarding_details.is_form_access = False
             onboarding_details.is_stepper = 4
 
-            user_data = context_user_data.get()
+            db.add(onboarding_details)
+            await db.flush()  # persist changes
+
             logger.info(
                 extra=user_data.model_dump() if user_data else {},
                 msg=f"Final onboarding submission completed for client: {onboarding_details.client_id}",
             )
             return final_result
         else:
-            user_data = context_user_data.get()
             logger.error(
                 extra=user_data.model_dump() if user_data else {},
                 msg="Final submission failed",
@@ -466,77 +653,63 @@ class ClientOnboardingService:
             )
 
     @staticmethod
-    def final_form_submission(onboarding_id: int):
+    async def final_form_submission(onboarding_id: int, db: AsyncSession):
         """
         Handles final form submission and creates Client_Onboarding record.
-        Uses client_id from context for proper mapping.
+        Works with AsyncSession passed from caller.
         """
         try:
-            logger.info(
-                extra=context_user_data.get(),
-                msg="Processing final form submission for onboarding_id: {}".format(
-                    onboarding_id
-                ),
-            )
+            user_data = context_user_data.get()
+            client_id = user_data.client_id if user_data else None
 
-            db = get_db_session()
-            client_id = context_user_data.get().client_id
+            logger.info(
+                extra=user_data.model_dump() if user_data else {},
+                msg=f"Processing final form submission for onboarding_id: {onboarding_id}",
+            )
 
             # Check if onboarding record already exists
-            existing_onboarding_record = (
-                db.query(Client_Onboarding)
-                .filter_by(client_onboarding_details_id=onboarding_id)
-                .first()
+            result = await db.execute(
+                select(Client_Onboarding).where(
+                    Client_Onboarding.client_onboarding_details_id == onboarding_id
+                )
             )
+            existing_onboarding_record = result.scalar_one_or_none()
 
             if existing_onboarding_record:
-                # Update existing record
                 existing_onboarding_record.remarks = ""
                 existing_onboarding_record.action_type = "new"
-                db.commit()
-
-                user_data = context_user_data.get()
+                await db.flush()
                 logger.info(
                     extra=user_data.model_dump() if user_data else {},
                     msg=f"Updated existing onboarding record for client_id: {client_id}",
                 )
                 return existing_onboarding_record.client_onboarding_details_id
-            else:
-                # Create new onboarding record
-                new_onboarding_record = Client_Onboarding(
-                    client_onboarding_details_id=onboarding_id,
-                    remarks="",
-                    client_id=client_id,
-                    action_type="new",
-                    status=False,
-                )
-                db.add(new_onboarding_record)
-                db.commit()
 
-                user_data = context_user_data.get()
-                logger.info(
-                    extra=user_data.model_dump() if user_data else {},
-                    msg=f"Created new onboarding record for client_id: {client_id}",
-                )
-                return new_onboarding_record.id
+            # Create new onboarding record
+            new_onboarding_record = Client_Onboarding(
+                client_onboarding_details_id=onboarding_id,
+                remarks="",
+                client_id=client_id,
+                action_type="new",
+                status=False,
+            )
+            db.add(new_onboarding_record)
+            await db.flush()
 
-        except DatabaseError as e:
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Database error during final form submission: {}".format(str(e)),
+            logger.info(
+                extra=user_data.model_dump() if user_data else {},
+                msg=f"Created new onboarding record for client_id: {client_id}",
             )
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="Could not complete final submission, please try again.",
-            )
+            return new_onboarding_record.id
+
         except Exception as e:
             logger.error(
-                extra=context_user_data.get(),
-                msg="Unexpected error during final form submission: {}".format(str(e)),
+                extra=user_data.model_dump() if user_data else {},
+                msg=f"Unexpected error during final form submission: {str(e)}",
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
+                message="Could not complete final submission. Please try again.",
             )
 
     @staticmethod
@@ -624,29 +797,160 @@ class ClientOnboardingService:
                 message="An internal server error occurred. Please try again later.",
             )
 
+    # @staticmethod
+    # async def get_onboarding(stepper: str) -> GenericResponseModel:
+    #     """
+    #     Retrieves onboarding data for a specific stepper.
+    #     Works with client_id instead of user_id.
+    #     """
+    #     try:
+    #         async with get_db_session() as db:
+    #             print("Hello abcd 123456 get onboarding**")
+    #             user_data = context_user_data.get()
+    #             logger.info(
+    #                 extra=user_data.model_dump() if user_data else {},
+    #                 msg="Retrieving onboarding data for stepper: {}".format(stepper),
+    #             )
+
+    #             client_id = context_user_data.get().client_id
+
+    #             # Get onboarding details for this client
+    #             existing_onboarding = (
+    #                 db.query(Client_Onboarding_Details)
+    #                 .filter_by(client_id=client_id)
+    #                 .first()
+    #             )
+
+    #             if not existing_onboarding:
+    #                 return GenericResponseModel(
+    #                     status_code=http.HTTPStatus.NOT_FOUND,
+    #                     status=False,
+    #                     message="No onboarding data found for this client",
+    #                     data={},
+    #                 )
+    #             # Base data
+    #             data = {
+    #                 "is_company_details": existing_onboarding.is_company_details,
+    #                 "is_review": existing_onboarding.is_review,
+    #                 "is_form_access": existing_onboarding.is_form_access,
+    #             }
+    #             # Stepper-specific data
+    #             if stepper == "2":
+    #                 data["companyDetails"] = {
+    #                     "company_legal_name": existing_onboarding.company_legal_name,
+    #                     "company_name": existing_onboarding.company_name,
+    #                     "office_address": existing_onboarding.office_address,
+    #                     "landmark": existing_onboarding.landmark,
+    #                     "pincode": existing_onboarding.pincode,
+    #                     "city": existing_onboarding.city,
+    #                     "state": existing_onboarding.state,
+    #                     "country": existing_onboarding.country,
+    #                     "phone_number": existing_onboarding.phone_number,
+    #                     "email": existing_onboarding.email,
+    #                 }
+
+    #             elif stepper == "3":
+    #                 data["terms"] = {"is_terms": existing_onboarding.is_term}
+
+    #             elif stepper == "4":
+    #                 # Get client onboarding status
+    #                 client_status = (
+    #                     db.query(
+    #                         Client_Onboarding.status,
+    #                         Client_Onboarding.action_type,
+    #                         Client_Onboarding.remarks,
+    #                     )
+    #                     .filter_by(client_onboarding_details_id=existing_onboarding.id)
+    #                     .first()
+    #                 )
+    #                 # Status information
+    #                 data["status"] = client_status.status if client_status else None
+    #                 data["remarks"] = client_status.remarks if client_status else None
+    #                 data["action_type"] = (
+    #                     client_status.action_type if client_status else None
+    #                 )
+
+    #                 # Company details
+    #                 data["companyDetails"] = {
+    #                     "company_legal_name": existing_onboarding.company_legal_name,
+    #                     "company_name": existing_onboarding.company_name,
+    #                     "office_address": existing_onboarding.office_address,
+    #                     "landmark": existing_onboarding.landmark,
+    #                     "pincode": existing_onboarding.pincode,
+    #                     "city": existing_onboarding.city,
+    #                     "state": existing_onboarding.state,
+    #                     "country": existing_onboarding.country,
+    #                     "phone_number": existing_onboarding.phone_number,
+    #                     "is_otp_verified": existing_onboarding.is_otp_verified,
+    #                     "otp_expires_at": existing_onboarding.otp_expires_at,
+    #                     "email": existing_onboarding.email,
+    #                 }
+    #                 # data["bankingDetails"] = None
+
+    #                 # Terms
+    #                 data["terms"] = {"is_terms": existing_onboarding.is_term}
+
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.OK,
+    #                 status=True,
+    #                 message="Data retrieved successfully",
+    #                 data=data,
+    #             )
+
+    #     except DatabaseError as e:
+    #         user_data = context_user_data.get()
+    #         logger.error(
+    #             extra=user_data.model_dump() if user_data else {},
+    #             msg="Database error during get_onboarding: {}".format(str(e)),
+    #         )
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="An error occurred while retrieving onboarding data.",
+    #         )
+    #     except Exception as e:
+    #         user_data = context_user_data.get()
+    #         logger.error(
+    #             extra=user_data.model_dump() if user_data else {},
+    #             msg="Unexpected error during get_onboarding: {}".format(str(e)),
+    #         )
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="An internal server error occurred. Please try again later.",
+    #         )
+
     @staticmethod
-    def get_onboarding(stepper: str) -> GenericResponseModel:
+    async def get_onboarding(stepper: str) -> GenericResponseModel:
         """
         Retrieves onboarding data for a specific stepper.
         Works with client_id instead of user_id.
         """
         try:
-            with get_db_session() as db:
+            async with get_db_session() as db:
                 user_data = context_user_data.get()
                 logger.info(
                     extra=user_data.model_dump() if user_data else {},
                     msg="Retrieving onboarding data for stepper: {}".format(stepper),
                 )
-
-                client_id = context_user_data.get().client_id
-
-                # Get onboarding details for this client
-                existing_onboarding = (
-                    db.query(Client_Onboarding_Details)
-                    .filter_by(client_id=client_id)
-                    .first()
+                client_id = user_data.client_id if user_data else None
+                if not client_id:
+                    return GenericResponseModel(
+                        status_code=400,
+                        status=False,
+                        message="Client context not found",
+                        data={},
+                    )
+                print(client_id, "|||||<client_id>|||||")
+                # Replace db.query() with select() + await db.execute()
+                result = await db.execute(
+                    select(Client_Onboarding_Details).where(
+                        Client_Onboarding_Details.client_id == client_id
+                    )
                 )
-
+                existing_onboarding = result.scalar_one_or_none()
+                print(
+                    jsonable_encoder(existing_onboarding),
+                    "|||||<existing_onboarding>|||||",
+                )
                 if not existing_onboarding:
                     return GenericResponseModel(
                         status_code=http.HTTPStatus.NOT_FOUND,
@@ -654,13 +958,14 @@ class ClientOnboardingService:
                         message="No onboarding data found for this client",
                         data={},
                     )
-                # Base data
+
+                # --- existing logic unchanged ---
                 data = {
                     "is_company_details": existing_onboarding.is_company_details,
                     "is_review": existing_onboarding.is_review,
                     "is_form_access": existing_onboarding.is_form_access,
                 }
-                # Stepper-specific data
+
                 if stepper == "2":
                     data["companyDetails"] = {
                         "company_legal_name": existing_onboarding.company_legal_name,
@@ -679,24 +984,24 @@ class ClientOnboardingService:
                     data["terms"] = {"is_terms": existing_onboarding.is_term}
 
                 elif stepper == "4":
-                    # Get client onboarding status
-                    client_status = (
-                        db.query(
+                    result = await db.execute(
+                        select(
                             Client_Onboarding.status,
                             Client_Onboarding.action_type,
                             Client_Onboarding.remarks,
+                        ).where(
+                            Client_Onboarding.client_onboarding_details_id
+                            == existing_onboarding.id
                         )
-                        .filter_by(client_onboarding_details_id=existing_onboarding.id)
-                        .first()
                     )
-                    # Status information
+                    client_status = result.first()
+
                     data["status"] = client_status.status if client_status else None
                     data["remarks"] = client_status.remarks if client_status else None
                     data["action_type"] = (
                         client_status.action_type if client_status else None
                     )
 
-                    # Company details
                     data["companyDetails"] = {
                         "company_legal_name": existing_onboarding.company_legal_name,
                         "company_name": existing_onboarding.company_name,
@@ -711,9 +1016,7 @@ class ClientOnboardingService:
                         "otp_expires_at": existing_onboarding.otp_expires_at,
                         "email": existing_onboarding.email,
                     }
-                    # data["bankingDetails"] = None
 
-                    # Terms
                     data["terms"] = {"is_terms": existing_onboarding.is_term}
 
                 return GenericResponseModel(

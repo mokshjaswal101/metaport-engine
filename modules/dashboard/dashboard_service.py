@@ -2,6 +2,8 @@ import http
 from psycopg2 import DatabaseError
 from sqlalchemy import func, case, cast
 from sqlalchemy.types import DateTime
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import func, case, cast, DateTime, select
 
 from logger import logger
 from context_manager.context import context_user_data, get_db_session
@@ -18,19 +20,16 @@ from .dashboard_schema import dashboard_filters
 class DashboardService:
 
     @staticmethod
-    def get_performance_data(filters: dashboard_filters) -> GenericResponseModel:
-
+    async def get_performance_data(filters: dashboard_filters) -> GenericResponseModel:
+        db: AsyncSession | None = None
         try:
-
-            db = get_db_session()
-
-            start_date = filters.start_date
-            end_date = filters.end_date
-
+            db = get_db_session()  # make sure this returns AsyncSession
+            start_date = filters.start_date.replace(tzinfo=None)  # naive datetime
+            end_date = filters.end_date.replace(tzinfo=None)
             client_id = context_user_data.get().client_id
 
-            # Base query
-            query = db.query(
+            # === Overall stats ===
+            overall_stmt = select(
                 func.count().label("total_orders"),
                 func.sum(
                     case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
@@ -50,31 +49,29 @@ class DashboardService:
                 func.sum(case((Order.status == "RTO", 1), else_=0)).label("rto"),
             ).filter(
                 Order.client_id == client_id,
-                Order.status != "cancelled",
-                Order.status != "new",
+                Order.status.notin_(["cancelled", "new"]),
                 Order.is_deleted == False,
                 cast(Order.booking_date, DateTime) >= start_date,
                 cast(Order.booking_date, DateTime) <= end_date,
             )
 
-            overall_stats = query.one()
+            result = await db.execute(overall_stmt)
+            overall_stats = result.one()
 
-            # Compute percentages
             total_completed = (overall_stats.delivered or 0) + (overall_stats.rto or 0)
             delivery_percentage = round(
                 (
-                    (overall_stats.delivered / total_completed) * 100
+                    ((overall_stats.delivered / total_completed) * 100)
                     if total_completed
                     else 0
                 ),
                 2,
             )
             rto_percentage = round(
-                ((overall_stats.rto / total_completed) * 100 if total_completed else 0),
+                ((overall_stats.rto / total_completed) * 100) if total_completed else 0,
                 2,
             )
 
-            # Convert overall_stats Row to a dictionary
             overall_stats_dict = {
                 "total_orders": overall_stats.total_orders or 0,
                 "booked": overall_stats.booked or 0,
@@ -85,19 +82,13 @@ class DashboardService:
                 "rto_percentage": rto_percentage,
             }
 
-            # Courier-wise aggregation (LIMIT 10)
-            courier_stats = (
-                db.query(
+            # === Courier-wise stats ===
+            courier_stmt = (
+                select(
                     Order.courier_partner,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -117,19 +108,19 @@ class DashboardService:
                 )
                 .filter(
                     Order.client_id == client_id,
-                    Order.status != "cancelled",
-                    Order.status != "new",
+                    Order.status.notin_(["cancelled", "new"]),
                     Order.is_deleted == False,
                     cast(Order.booking_date, DateTime) >= start_date,
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.courier_partner)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 couriers
-                .all()
+                .order_by(func.count().desc())
+                .limit(10)
             )
 
-            # Convert courier_stats to list of dictionaries
+            result = await db.execute(courier_stmt)
+            courier_stats = result.all()
+
             courier_stats_list = [
                 {
                     "courier_partner": row.courier_partner,
@@ -140,8 +131,13 @@ class DashboardService:
                     "rto": row.rto or 0,
                     "delivery_percentage": round(
                         (
-                            (row.delivered / ((row.delivered or 0) + (row.rto or 0)))
-                            * 100
+                            (
+                                (
+                                    row.delivered
+                                    / ((row.delivered or 0) + (row.rto or 0))
+                                )
+                                * 100
+                            )
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -149,7 +145,7 @@ class DashboardService:
                     ),
                     "rto_percentage": round(
                         (
-                            (row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100
+                            ((row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100)
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -159,19 +155,13 @@ class DashboardService:
                 for row in courier_stats
             ]
 
-            # Zone-wise aggregation (LIMIT 10)
-            zone_stats = (
-                db.query(
+            # === Zone-wise stats ===
+            zone_stmt = (
+                select(
                     Order.zone,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -191,18 +181,19 @@ class DashboardService:
                 )
                 .filter(
                     Order.client_id == client_id,
-                    Order.status != "cancelled",
-                    Order.status != "new",
+                    Order.status.notin_(["cancelled", "new"]),
                     Order.is_deleted == False,
                     cast(Order.booking_date, DateTime) >= start_date,
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.zone)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
-                .all()
+                .order_by(func.count().desc())
+                .limit(10)
             )
-            # Convert zone_stats to list of dictionaries
+
+            result = await db.execute(zone_stmt)
+            zone_stats = result.all()
+
             zone_stats_list = [
                 {
                     "zone": row.zone,
@@ -213,8 +204,13 @@ class DashboardService:
                     "rto": row.rto or 0,
                     "delivery_percentage": round(
                         (
-                            (row.delivered / ((row.delivered or 0) + (row.rto or 0)))
-                            * 100
+                            (
+                                (
+                                    row.delivered
+                                    / ((row.delivered or 0) + (row.rto or 0))
+                                )
+                                * 100
+                            )
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -222,7 +218,7 @@ class DashboardService:
                     ),
                     "rto_percentage": round(
                         (
-                            (row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100
+                            ((row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100)
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -232,19 +228,13 @@ class DashboardService:
                 for row in zone_stats
             ]
 
-            # City_wise Performance
-            city_stats = (
-                db.query(
+            # === City-wise stats ===
+            city_stmt = (
+                select(
                     Order.consignee_city,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -264,19 +254,19 @@ class DashboardService:
                 )
                 .filter(
                     Order.client_id == client_id,
-                    Order.status != "cancelled",
-                    Order.status != "new",
+                    Order.status.notin_(["cancelled", "new"]),
                     Order.is_deleted == False,
                     cast(Order.booking_date, DateTime) >= start_date,
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.consignee_city)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
-                .all()
+                .order_by(func.count().desc())
+                .limit(10)
             )
 
-            # Convert zone_stats to list of dictionaries
+            result = await db.execute(city_stmt)
+            city_stats = result.all()
+
             city_stats_list = [
                 {
                     "city": row.consignee_city,
@@ -287,8 +277,13 @@ class DashboardService:
                     "rto": row.rto or 0,
                     "delivery_percentage": round(
                         (
-                            (row.delivered / ((row.delivered or 0) + (row.rto or 0)))
-                            * 100
+                            (
+                                (
+                                    row.delivered
+                                    / ((row.delivered or 0) + (row.rto or 0))
+                                )
+                                * 100
+                            )
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -296,7 +291,7 @@ class DashboardService:
                     ),
                     "rto_percentage": round(
                         (
-                            (row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100
+                            ((row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100)
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -306,19 +301,13 @@ class DashboardService:
                 for row in city_stats
             ]
 
-            # state_wise Performance
-            state_stats = (
-                db.query(
+            # === State-wise stats ===
+            state_stmt = (
+                select(
                     Order.consignee_state,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -338,19 +327,19 @@ class DashboardService:
                 )
                 .filter(
                     Order.client_id == client_id,
-                    Order.status != "cancelled",
-                    Order.status != "new",
+                    Order.status.notin_(["cancelled", "new"]),
                     Order.is_deleted == False,
                     cast(Order.booking_date, DateTime) >= start_date,
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.consignee_state)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
-                .all()
+                .order_by(func.count().desc())
+                .limit(10)
             )
 
-            # Convert zone_stats to list of dictionaries
+            result = await db.execute(state_stmt)
+            state_stats = result.all()
+
             state_stats_list = [
                 {
                     "state": row.consignee_state,
@@ -361,8 +350,13 @@ class DashboardService:
                     "rto": row.rto or 0,
                     "delivery_percentage": round(
                         (
-                            (row.delivered / ((row.delivered or 0) + (row.rto or 0)))
-                            * 100
+                            (
+                                (
+                                    row.delivered
+                                    / ((row.delivered or 0) + (row.rto or 0))
+                                )
+                                * 100
+                            )
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -370,7 +364,7 @@ class DashboardService:
                     ),
                     "rto_percentage": round(
                         (
-                            (row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100
+                            ((row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100)
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -380,19 +374,13 @@ class DashboardService:
                 for row in state_stats
             ]
 
-            # state_wise Performance
-            pincode_stats = (
-                db.query(
+            # === Pincode-wise stats ===
+            pincode_stmt = (
+                select(
                     Order.consignee_pincode,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -412,19 +400,19 @@ class DashboardService:
                 )
                 .filter(
                     Order.client_id == client_id,
-                    Order.status != "cancelled",
-                    Order.status != "new",
+                    Order.status.notin_(["cancelled", "new"]),
                     Order.is_deleted == False,
                     cast(Order.booking_date, DateTime) >= start_date,
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.consignee_pincode)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
-                .all()
+                .order_by(func.count().desc())
+                .limit(10)
             )
 
-            # Convert zone_stats to list of dictionaries
+            result = await db.execute(pincode_stmt)
+            pincode_stats = result.all()
+
             pincode_stats_list = [
                 {
                     "pincode": row.consignee_pincode,
@@ -435,8 +423,13 @@ class DashboardService:
                     "rto": row.rto or 0,
                     "delivery_percentage": round(
                         (
-                            (row.delivered / ((row.delivered or 0) + (row.rto or 0)))
-                            * 100
+                            (
+                                (
+                                    row.delivered
+                                    / ((row.delivered or 0) + (row.rto or 0))
+                                )
+                                * 100
+                            )
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -444,7 +437,7 @@ class DashboardService:
                     ),
                     "rto_percentage": round(
                         (
-                            (row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100
+                            ((row.rto / ((row.delivered or 0) + (row.rto or 0))) * 100)
                             if (row.delivered or 0) + (row.rto or 0)
                             else 0
                         ),
@@ -454,7 +447,7 @@ class DashboardService:
                 for row in pincode_stats
             ]
 
-            # Correct response structure
+            # Build final response
             data = {
                 "overall_stats": overall_stats_dict,
                 "courier_wise_stats": courier_stats_list,
@@ -464,7 +457,6 @@ class DashboardService:
                 "pincode_wise_stats": pincode_stats_list,
             }
 
-            # Return response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 status=True,
@@ -472,31 +464,12 @@ class DashboardService:
                 message="Successful",
             )
 
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error creating Order: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="Could not login user, please try again.",
-            )
-
         except Exception as e:
-            # Log other unhandled exceptions
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
-            )
-            # Return a general internal server error response
+            logger.error(extra=context_user_data.get(), msg=f"Unhandled error: {e}")
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
             )
-
         finally:
             if db:
-                db.close()
+                await db.close()

@@ -6,6 +6,8 @@ from pytz import timezone
 import os
 from psycopg2 import DatabaseError
 from sqlalchemy.types import DateTime, String
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 from sqlalchemy import (
     cast,
@@ -31,56 +33,51 @@ UTC = timezone("UTC")
 class WalletService:
 
     @staticmethod
-    def get_balance():
-
+    async def get_balance():
+        db: AsyncSession = None
         try:
             print(f"Number of CPUs: {os.cpu_count()}")
-
             client_id = context_user_data.get().client_id
-
-            db = get_db_session()
+            db = get_db_session()  # your async session
             print(client_id, "hello acbd =>>")
-
-            wallet = db.query(Wallet).filter(Wallet.client_id == client_id).first()
-            print(wallet, "Find action")
+            # --- Async version of query + first() ---
+            result = await db.execute(
+                select(Wallet).where(Wallet.client_id == client_id)
+            )
+            wallet = result.scalar_one_or_none()
             if wallet is None:
-                # Return error response
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message="Wallet not found",
                 )
-            print("Wallet Found")
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 status=True,
                 data=WalletResponseModel(**wallet.to_model().model_dump()),
                 message="successfull",
             )
-
         except DatabaseError as e:
-            # Log database error
             logger.error(
                 extra=context_user_data.get(),
                 msg="Error posting shipment: {}".format(str(e)),
             )
-
-            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Unable to get balance",
             )
-
         except Exception as e:
-            # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
                 msg="Unhandled error: {}".format(str(e)),
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Unable to get balance",
             )
+        finally:
+            # Close DB session safely
+            if db is not None:
+                await db.close()
 
     @staticmethod
     def update_wallet(reference, credit=0, debit=0, transaction_type="Freight"):
@@ -236,77 +233,129 @@ class WalletService:
                 message="Unable to update wallet",
             )
 
+    # @staticmethod
+    # def check_sufficient_balance(amount: float):
+
+    #     try:
+
+    #         client_id = context_user_data.get().client_id
+
+    #         db = get_db_session()
+
+    #         wallet = db.query(Wallet).filter(Wallet.client_id == client_id).first()
+
+    #         # if no wallet is found, return error message
+    #         if wallet is None:
+    #             # Return error response
+    #             return GenericResponseModel(
+    #                 status=False,
+    #                 status_code=http.HTTPStatus.OK,
+    #                 message="Wallet not found",
+    #             )
+
+    #         # for prepaid wallet
+
+    #         if wallet.wallet_type == "prepaid":
+
+    #             if amount > wallet.amount:
+    #                 return GenericResponseModel(
+    #                     status=False,
+    #                     status_code=http.HTTPStatus.BAD_REQUEST,
+    #                     message="Insufficient Balance",
+    #                 )
+
+    #             return GenericResponseModel(
+    #                 status=True,
+    #                 status_code=http.HTTPStatus.OK,
+    #                 message="Sufficient Balance",
+    #             )
+
+    #         # for COD - wallet
+
+    #         if wallet.wallet_type == "COD":
+
+    #             return GenericResponseModel(
+    #                 status=False,
+    #                 status_code=http.HTTPStatus.BAD_REQUEST,
+    #                 message="Not allowed kindly change the wallet type",
+    #             )
+
+    #     except DatabaseError as e:
+    #         # Log database error
+    #         logger.error(
+    #             extra=context_user_data.get(),
+    #             msg="Error posting shipment: {}".format(str(e)),
+    #         )
+
+    #         # Return error response
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="Unable to get balance",
+    #         )
+
+    #     except Exception as e:
+    #         # Log other unhandled exceptions
+    #         logger.error(
+    #             extra=context_user_data.get(),
+    #             msg="Unhandled error: {}".format(str(e)),
+    #         )
+    #         # Return a general internal server error response
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             message="Unable to get balance",
+    #         )
+
     @staticmethod
-    def check_sufficient_balance(amount: float):
+    async def check_sufficient_balance(amount: float):
+        db: AsyncSession = get_db_session()  # must be a fresh async session
 
         try:
-
             client_id = context_user_data.get().client_id
-
-            db = get_db_session()
-
-            wallet = db.query(Wallet).filter(Wallet.client_id == client_id).first()
-
-            # if no wallet is found, return error message
+            # Fetch wallet
+            result = await db.execute(
+                select(Wallet).where(Wallet.client_id == client_id)
+            )
+            wallet = result.scalars().first()
             if wallet is None:
-                # Return error response
                 return GenericResponseModel(
                     status=False,
                     status_code=http.HTTPStatus.OK,
                     message="Wallet not found",
                 )
-
-            # for prepaid wallet
-
+            # Prepaid wallet
             if wallet.wallet_type == "prepaid":
-
                 if amount > wallet.amount:
                     return GenericResponseModel(
                         status=False,
                         status_code=http.HTTPStatus.BAD_REQUEST,
                         message="Insufficient Balance",
                     )
-
                 return GenericResponseModel(
                     status=True,
                     status_code=http.HTTPStatus.OK,
                     message="Sufficient Balance",
                 )
-
-            # for COD - wallet
-
+            # COD wallet
             if wallet.wallet_type == "COD":
-
                 return GenericResponseModel(
                     status=False,
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message="Not allowed kindly change the wallet type",
                 )
-
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error posting shipment: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="Unable to get balance",
-            )
-
         except Exception as e:
-            # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
+                msg=f"Unhandled error: {e}",
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Unable to get balance",
             )
+        finally:
+            try:
+                await db.close()  # safe close
+            except Exception:
+                pass
 
     @staticmethod
     def deduct_money(

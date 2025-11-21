@@ -48,21 +48,48 @@ async def get_all_clients(clientFilters: getClientFiltersModel):
     return build_api_response(response)
 
 
+# @client_router.post(
+#     "/on-boarding",
+#     status_code=http.HTTPStatus.CREATED,
+#     response_model=GenericResponseModel,
+# )
+# async def onboarding_client(
+#     onBoardingForm: OnBoardingForm,
+# ):
+
+#     response: GenericResponseModel = ClientOnboardingService.onboarding_create(
+#         onboarding_form=onBoardingForm
+#     )
+#     return build_api_response(response)
+
+
 @client_router.post(
     "/on-boarding",
     status_code=http.HTTPStatus.CREATED,
     response_model=GenericResponseModel,
 )
-async def onboarding_client(
-    onBoardingForm: OnBoardingForm,
-):
-
-    response: GenericResponseModel = ClientOnboardingService.onboarding_create(
+async def onboarding_client(onBoardingForm: OnBoardingForm):
+    # Await the async service method
+    response: GenericResponseModel = await ClientOnboardingService.onboarding_create(
         onboarding_form=onBoardingForm
     )
     return build_api_response(response)
 
 
+# @client_router.post(
+#     "/otp-verify",
+#     status_code=http.HTTPStatus.CREATED,
+#     response_model=GenericResponseModel,
+# )
+# async def otp_verified(
+#     otpVerified: OtpVerified,
+# ):
+
+
+#     response: GenericResponseModel = ClientOnboardingService.otp_verified(
+#         otpVerified=otpVerified
+#     )
+#     return build_api_response(response)
 @client_router.post(
     "/otp-verify",
     status_code=http.HTTPStatus.CREATED,
@@ -71,11 +98,22 @@ async def onboarding_client(
 async def otp_verified(
     otpVerified: OtpVerified,
 ):
+    try:
+        # Call the async service method
+        response: GenericResponseModel = await ClientOnboardingService.otp_verified(
+            otpVerified=otpVerified
+        )
+        return build_api_response(response)
 
-    response: GenericResponseModel = ClientOnboardingService.otp_verified(
-        otpVerified=otpVerified
-    )
-    return build_api_response(response)
+    except Exception as e:
+        # Handle unexpected errors
+        return build_api_response(
+            GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                data=str(e),
+                message="An internal server error occurred during OTP verification.",
+            )
+        )
 
 
 @client_router.post(
@@ -105,6 +143,28 @@ async def onboarding_client(
 
 
 # Get onboarding forms data
+# @client_router.get(
+#     "/on-boarding/{stepper}",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def get_onboarding(stepper: str):
+#     try:
+#         response: GenericResponseModel = ClientOnboardingService.get_onboarding(
+#             stepper=stepper
+#         )
+#         return build_api_response(response)
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while tracking the shipment.",
+#             )
+#         )
+
+
 @client_router.get(
     "/on-boarding/{stepper}",
     status_code=http.HTTPStatus.OK,
@@ -112,7 +172,8 @@ async def onboarding_client(
 )
 async def get_onboarding(stepper: str):
     try:
-        response: GenericResponseModel = ClientOnboardingService.get_onboarding(
+        # Await the async service method
+        response: GenericResponseModel = await ClientOnboardingService.get_onboarding(
             stepper=stepper
         )
         return build_api_response(response)
@@ -122,7 +183,7 @@ async def get_onboarding(stepper: str):
             GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
-                message="An error occurred while tracking the shipment.",
+                message="An error occurred while fetching onboarding data.",
             )
         )
 
@@ -145,6 +206,19 @@ async def onboarding_client(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# @client_router.get(
+#     "/complete-details",
+#     status_code=http.HTTPStatus.OK,
+#     response_model=GenericResponseModel,
+# )
+# async def get_complete_client_details():
+#     """
+#     Get complete client details including client data, onboarding details, and bank details
+#     """
+#     response: GenericResponseModel = ClientService.get_complete_client_details()
+#     return build_api_response(response)
+
+
 @client_router.get(
     "/complete-details",
     status_code=http.HTTPStatus.OK,
@@ -154,5 +228,5 @@ async def get_complete_client_details():
     """
     Get complete client details including client data, onboarding details, and bank details
     """
-    response: GenericResponseModel = ClientService.get_complete_client_details()
+    response: GenericResponseModel = await ClientService.get_complete_client_details()
     return build_api_response(response)

@@ -24,7 +24,7 @@ class Client_Onboarding_Details(DBBase, DBBaseClass):
 
     is_coi = Column(Boolean, nullable=True, default=True)
     is_otp = Column(String(255), nullable=True)
-    is_otp_verified = Column(String(255), nullable=True)
+    is_otp_verified = Column(Boolean, default=False)  # <-- BOOLEAN, not VARCHAR
     otp_expires_at = Column(DateTime, nullable=True)
 
     is_gst = Column(Boolean, nullable=True, default=True)

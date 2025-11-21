@@ -11,6 +11,7 @@ from sqlalchemy.orm import joinedload
 from fastapi import APIRouter, File, UploadFile, Form
 from xhtml2pdf import pisa
 from pypdf import PdfWriter, PdfReader
+from sqlalchemy import select
 from pathlib import Path
 from logger import logger
 from fastapi.responses import StreamingResponse
@@ -121,14 +122,18 @@ class ShippingLabelService:
         return client_name, None
 
     @staticmethod
-    def _get_fresh_label_settings(client_id: int, db_session) -> GenericResponseModel:
-        """Get fresh label settings from database"""
+    async def _get_fresh_label_settings(
+        client_id: int, db_session
+    ) -> GenericResponseModel:
+        """Get fresh label settings from database asynchronously"""
         try:
-            settings = (
-                db_session.query(Shipping_Label_Setting)
-                .filter(Shipping_Label_Setting.client_id == client_id)
-                .first()
+            # Execute async query
+            result = await db_session.execute(
+                select(Shipping_Label_Setting).where(
+                    Shipping_Label_Setting.client_id == client_id
+                )
             )
+            settings = result.scalars().first()  # Get the first row
 
             if not settings:
                 return GenericResponseModel(
@@ -161,8 +166,45 @@ class ShippingLabelService:
                 message="Could not retrieve label settings.",
             )
 
+    # @staticmethod
+    # def get_label_settings() -> GenericResponseModel:
+    #     try:
+    #         client_id = context_user_data.get().client_id
+
+    #         # Return cached settings if available
+    #         cached = LabelSettingsCache.get(client_id)
+    #         if cached:
+    #             return GenericResponseModel(
+    #                 status_code=http.HTTPStatus.OK,
+    #                 status=True,
+    #                 data={"label_settings": cached},
+    #                 message="Label settings retrieved successfully (cached).",
+    #             )
+
+    #         # Fallback to database
+    #         db = get_db_session()
+    #         return ShippingLabelService._get_fresh_label_settings(client_id, db)
+
+    #     except DatabaseError as db_error:
+    #         logger.error(
+    #             f"Database error while retrieving label settings: {str(db_error)}"
+    #         )
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             status=False,
+    #             message="Could not retrieve label settings. Please try again.",
+    #         )
+
+    #     except Exception as ex:
+    #         logger.error(f"Unhandled error while retrieving label settings: {str(ex)}")
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             status=False,
+    #             message="An internal server error occurred. Please try again later.",
+    #         )
     @staticmethod
-    def get_label_settings() -> GenericResponseModel:
+    async def get_label_settings() -> GenericResponseModel:
+        db = None
         try:
             client_id = context_user_data.get().client_id
 
@@ -176,9 +218,9 @@ class ShippingLabelService:
                     message="Label settings retrieved successfully (cached).",
                 )
 
-            # Fallback to database
-            db = get_db_session()
-            return ShippingLabelService._get_fresh_label_settings(client_id, db)
+            # Get AsyncSession from context
+            db = get_db_session()  # AsyncSession
+            return await ShippingLabelService._get_fresh_label_settings(client_id, db)
 
         except DatabaseError as db_error:
             logger.error(
@@ -197,6 +239,10 @@ class ShippingLabelService:
                 status=False,
                 message="An internal server error occurred. Please try again later.",
             )
+
+        finally:
+            if db:
+                await db.close()  # Ensure async session is closed
 
     @staticmethod
     def generate_label(order_ids: List[str]) -> str:
@@ -420,35 +466,91 @@ class ShippingLabelService:
             # Return label only if invoice fails
             return label_pdf_buffer
 
+    # @staticmethod
+    # def update_label_settings(
+    #     label_parameters: LabelSettingUpdateModel,
+    # ) -> GenericResponseModel:
+    #     """Update label settings and invalidate cache"""
+    #     client_id = context_user_data.get().client_id
+
+    #     try:
+    #         with get_db_session() as db:
+    #             settings = (
+    #                 db.query(Shipping_Label_Setting)
+    #                 .filter(Shipping_Label_Setting.client_id == client_id)
+    #                 .first()
+    #             )
+
+    #             if not settings:
+    #                 settings = Shipping_Label_Setting(client_id=client_id)
+    #                 db.add(settings)
+
+    #             # Update settings
+    #             updated_values = label_parameters.model_dump(exclude_unset=True)
+    #             for key, value in updated_values.items():
+    #                 setattr(settings, key, value)
+
+    #             db.add(settings)
+    #             db.commit()
+
+    #             # Invalidate cache
+    #             LabelSettingsCache.invalidate(client_id)
+
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.OK,
+    #             status=True,
+    #             message="Settings updated successfully.",
+    #         )
+
+    #     except DatabaseError as db_error:
+    #         logger.error(
+    #             f"Database error while updating label settings: {str(db_error)}"
+    #         )
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             status=False,
+    #             message="Could not update label settings. Please try again.",
+    #         )
+
+    #     except Exception as ex:
+    #         logger.error(f"Unhandled error during label settings update: {str(ex)}")
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             status=False,
+    #             message="An internal server error occurred. Please try again later.",
+    #         )
+
     @staticmethod
-    def update_label_settings(
+    async def update_label_settings(
         label_parameters: LabelSettingUpdateModel,
     ) -> GenericResponseModel:
-        """Update label settings and invalidate cache"""
+        """Update label settings and invalidate cache asynchronously"""
         client_id = context_user_data.get().client_id
+        db_session = get_db_session()  # Should be async session from context
 
         try:
-            with get_db_session() as db:
-                settings = (
-                    db.query(Shipping_Label_Setting)
-                    .filter(Shipping_Label_Setting.client_id == client_id)
-                    .first()
+            # Fetch existing settings asynchronously
+            result = await db_session.execute(
+                select(Shipping_Label_Setting).where(
+                    Shipping_Label_Setting.client_id == client_id
                 )
+            )
+            settings = result.scalars().first()
 
-                if not settings:
-                    settings = Shipping_Label_Setting(client_id=client_id)
-                    db.add(settings)
+            if not settings:
+                settings = Shipping_Label_Setting(client_id=client_id)
+                db_session.add(settings)
 
-                # Update settings
-                updated_values = label_parameters.model_dump(exclude_unset=True)
-                for key, value in updated_values.items():
-                    setattr(settings, key, value)
+            # Update only provided values
+            updated_values = label_parameters.model_dump(exclude_unset=True)
+            for key, value in updated_values.items():
+                setattr(settings, key, value)
 
-                db.add(settings)
-                db.commit()
+            db_session.add(settings)
+            await db_session.commit()  # Async commit
 
-                # Invalidate cache
-                LabelSettingsCache.invalidate(client_id)
+            # Invalidate cache
+            LabelSettingsCache.invalidate(client_id)
 
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
@@ -456,23 +558,17 @@ class ShippingLabelService:
                 message="Settings updated successfully.",
             )
 
-        except DatabaseError as db_error:
-            logger.error(
-                f"Database error while updating label settings: {str(db_error)}"
-            )
+        except Exception as ex:
+            await db_session.rollback()  # Rollback on error
+            logger.error(f"Error updating label settings: {str(ex)}")
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 status=False,
-                message="Could not update label settings. Please try again.",
+                message="Could not update label settings. Please try again later.",
             )
 
-        except Exception as ex:
-            logger.error(f"Unhandled error during label settings update: {str(ex)}")
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                status=False,
-                message="An internal server error occurred. Please try again later.",
-            )
+        finally:
+            await db_session.close()  # Close async session
 
     @staticmethod
     def generate_invoice(order_ids: List[str]) -> str:
@@ -530,69 +626,138 @@ class ShippingLabelService:
             logger.error(f"Could not generate invoices: {str(e)}")
             return "Error generating invoices"
 
+    # @staticmethod
+    # def upload_logo(file: UploadFile) -> GenericResponseModel:
+    #     """Upload logo with optimized S3 handling"""
+    #     try:
+    #         filename = file.filename
+    #         content_type = file.content_type
+    #         client_id = context_user_data.get().client_id
+
+    #         # Validate file extension
+    #         file_extension = filename.split(".")[-1].lower()
+    #         allowed_extensions = {"jpg", "jpeg", "png"}
+    #         if file_extension not in allowed_extensions:
+    #             raise ValueError("Invalid file type. Allowed: jpg, jpeg, png")
+
+    #         # Standard filename and S3 key
+    #         company_logo_filename = f"company_logo.{file_extension}"
+    #         s3_key = f"{client_id}/shipping_labels/{company_logo_filename}"
+
+    #         # Handle existing logo deletion
+    #         with get_db_session() as db:
+    #             existing_settings = (
+    #                 db.query(Shipping_Label_Setting)
+    #                 .filter(Shipping_Label_Setting.client_id == client_id)
+    #                 .first()
+    #             )
+
+    #             if existing_settings and existing_settings.logo_url:
+    #                 try:
+    #                     # Extract S3 key from URL and delete old logo
+    #                     old_s3_key = existing_settings.logo_url.split(
+    #                         ".amazonaws.com/", 1
+    #                     )[1]
+    #                     delete_result = delete_file_from_s3(old_s3_key)
+    #                     if not delete_result["success"]:
+    #                         logger.warning(
+    #                             f"Failed to delete old logo: {delete_result.get('error')}"
+    #                         )
+    #                 except Exception as delete_error:
+    #                     logger.warning(f"Error deleting old logo: {str(delete_error)}")
+
+    #         # Upload new logo
+    #         upload_result = upload_file_to_s3(
+    #             file_obj=file.file, s3_key=s3_key, content_type=content_type
+    #         )
+
+    #         if not upload_result["success"]:
+    #             raise Exception(f"S3 upload failed: {upload_result.get('error')}")
+
+    #         file_url = upload_result["url"]
+
+    #         # Invalidate cache since logo URL changed
+    #         LabelSettingsCache.invalidate(client_id)
+
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.OK,
+    #             data={"file": file_url},
+    #             message="Image uploaded successfully.",
+    #         )
+
+    #     except Exception as e:
+    #         logger.error(f"Error uploading image: {str(e)}")
+    #         return GenericResponseModel(
+    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+    #             data=str(e),
+    #             message="An error occurred during image upload.",
+    #         )
+
     @staticmethod
-    def upload_logo(file: UploadFile) -> GenericResponseModel:
-        """Upload logo with optimized S3 handling"""
+    async def upload_logo(file: UploadFile) -> GenericResponseModel:
         try:
             filename = file.filename
             content_type = file.content_type
             client_id = context_user_data.get().client_id
 
-            # Validate file extension
-            file_extension = filename.split(".")[-1].lower()
-            allowed_extensions = {"jpg", "jpeg", "png"}
-            if file_extension not in allowed_extensions:
-                raise ValueError("Invalid file type. Allowed: jpg, jpeg, png")
+            # Validate extension
+            ext = filename.split(".")[-1].lower()
+            if ext not in {"jpg", "jpeg", "png"}:
+                raise ValueError("Invalid image type")
 
-            # Standard filename and S3 key
-            company_logo_filename = f"company_logo.{file_extension}"
-            s3_key = f"{client_id}/shipping_labels/{company_logo_filename}"
+            s3_key = f"{client_id}/shipping_labels/company_logo.{ext}"
 
-            # Handle existing logo deletion
-            with get_db_session() as db:
-                existing_settings = (
-                    db.query(Shipping_Label_Setting)
-                    .filter(Shipping_Label_Setting.client_id == client_id)
-                    .first()
+            # Read file bytes
+            file_bytes = await file.read()
+            if not file_bytes:
+                raise ValueError("Empty file received")
+
+            print("FILE BYTES LENGTH =", len(file_bytes))
+
+            # ---- Delete old logo using AsyncSession ----
+            async with get_db_session() as db:
+                result = await db.execute(
+                    select(Shipping_Label_Setting).where(
+                        Shipping_Label_Setting.client_id == client_id
+                    )
                 )
+                existing = result.scalars().first()
 
-                if existing_settings and existing_settings.logo_url:
-                    try:
-                        # Extract S3 key from URL and delete old logo
-                        old_s3_key = existing_settings.logo_url.split(
-                            ".amazonaws.com/", 1
-                        )[1]
-                        delete_result = delete_file_from_s3(old_s3_key)
-                        if not delete_result["success"]:
-                            logger.warning(
-                                f"Failed to delete old logo: {delete_result.get('error')}"
-                            )
-                    except Exception as delete_error:
-                        logger.warning(f"Error deleting old logo: {str(delete_error)}")
+                if (
+                    existing
+                    and existing.logo_url
+                    and ".amazonaws.com/" in existing.logo_url
+                ):
+                    old_key = existing.logo_url.split(".amazonaws.com/", 1)[1]
+                    delete_file_from_s3(old_key)
 
-            # Upload new logo
-            upload_result = upload_file_to_s3(
-                file_obj=file.file, s3_key=s3_key, content_type=content_type
+            print("OLD LOGO DELETED IF EXISTS")
+
+            # ---- Upload new logo ----
+            upload_result = await upload_file_to_s3(
+                file_bytes=file_bytes,
+                s3_key=s3_key,
+                content_type=content_type,
             )
+            print("UPLOAD RESULT =", upload_result)
 
             if not upload_result["success"]:
-                raise Exception(f"S3 upload failed: {upload_result.get('error')}")
+                raise Exception(f"S3 upload failed: {upload_result['error']}")
 
-            file_url = upload_result["url"]
-
-            # Invalidate cache since logo URL changed
+            # Invalidate cache
             LabelSettingsCache.invalidate(client_id)
 
             return GenericResponseModel(
-                status_code=http.HTTPStatus.OK,
-                data={"file": file_url},
+                status_code=200,
+                status=True,
+                data={"file": upload_result["url"]},
                 message="Image uploaded successfully.",
             )
 
         except Exception as e:
-            logger.error(f"Error uploading image: {str(e)}")
+            logger.error(f"Error uploading image: {e}")
             return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                data=str(e),
-                message="An error occurred during image upload.",
+                status_code=500,
+                status=False,
+                message=str(e),
             )
