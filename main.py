@@ -23,7 +23,7 @@ from router import DefaultRouter
 from router import StatusRouter
 from router import OpenRouter
 from modules.authentication import auth_router
-
+from modules.user import otp_router  # OTP endpoints without full auth
 
 from database import DBBase, db_engine
 
@@ -34,8 +34,9 @@ DBBase.metadata.create_all(db_engine)
 app = FastAPI()
 
 # Include the routers
-app.include_router(CommonRouter)
-app.include_router(auth_router)
+app.include_router(CommonRouter)  # Authenticated endpoints (requires OTP verification)
+app.include_router(auth_router)  # Login/Signup (no auth required)
+app.include_router(otp_router)  # OTP verification (token required but no OTP verification check)
 app.include_router(StatusRouter)
 app.include_router(DefaultRouter)
 app.include_router(OpenRouter)
@@ -46,14 +47,33 @@ app.add_exception_handler(ValidationError, handle_validation_error)
 app.add_exception_handler(HTTPException, custom_http_exception_handler)
 
 
-# add the middleware for cors
+# CORS Configuration
+# Configure allowed origins from environment variable for security
+# For development, use: ALLOWED_ORIGINS="http://localhost:3000,http://localhost:5173"
+# For production, use specific domains: ALLOWED_ORIGINS="https://app.metaport.com"
+ALLOWED_ORIGINS = os.environ.get("ALLOWED_ORIGINS", "").split(",")
+
+# Fallback to allow all in development if not configured (NOT RECOMMENDED for production)
+if not ALLOWED_ORIGINS or ALLOWED_ORIGINS == [""]:
+    logger.warning(
+        "CORS: No ALLOWED_ORIGINS configured. Allowing all origins (INSECURE - not recommended for production)"
+    )
+    ALLOWED_ORIGINS = ["*"]
+else:
+    # Clean up whitespace
+    ALLOWED_ORIGINS = [origin.strip() for origin in ALLOWED_ORIGINS if origin.strip()]
+    logger.info(f"CORS: Allowed origins configured: {ALLOWED_ORIGINS}")
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    expose_headers=["Content-Length", "X-Request-ID"],
+    max_age=600,  # Cache preflight requests for 10 minutes
 )
+
 
 # Define queue and number of workers
 NUM_WORKERS = 14

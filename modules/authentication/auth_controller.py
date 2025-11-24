@@ -25,6 +25,7 @@ async def login_user(
     user_login_data: UserLoginModel,
     _=Depends(build_request_context),
 ):
+
     response: GenericResponseModel = AuthService.login_user(
         user_login_data=user_login_data
     )
@@ -36,10 +37,11 @@ async def login_user(
     "/signup",
     status_code=http.HTTPStatus.OK,
 )
-async def login_user(
+async def signup_user(
     client_data: UserRegisterModel,
     _=Depends(build_request_context),
 ):
+
     response: GenericResponseModel = AuthService.signup(client_data=client_data)
 
     return build_api_response(response)
@@ -49,22 +51,13 @@ async def login_user(
     "/dev/login",
     status_code=http.HTTPStatus.OK,
 )
-async def login_user(
+async def dev_login_user(
     user_login_data: UserLoginModel,
     _=Depends(build_request_context),
 ):
+    """Development login endpoint (same as /login but for testing)"""
     response: GenericResponseModel = AuthService.login_user(
         user_login_data=user_login_data
     )
-
-    return build_api_response(response)
-
-
-@auth_router.post(
-    "/contract/transfer",
-    status_code=http.HTTPStatus.OK,
-)
-async def contract_transfer(_=Depends(build_request_context)):
-    response: GenericResponseModel = AuthService.contract_transfer()
 
     return build_api_response(response)

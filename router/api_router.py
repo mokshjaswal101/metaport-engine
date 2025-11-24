@@ -40,6 +40,10 @@ from modules.shipping_notifications.shipping_notifications_controller import (
 )
 
 from modules.channels.channel_controller import router as channel_router
+from modules.channels.integrations.shopify import (
+    shopify_oauth_integration_router,
+    shopify_management_integration_router,
+)
 
 
 # settings
@@ -49,8 +53,69 @@ from modules.documents.shipping_label.shipping_label_controller import label_rou
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
 ):
+    """
+    Authenticate user and verify they are active and OTP verified.
+    This middleware ensures:
+    1. Valid JWT token
+    2. User exists in database
+    3. User status is 'active'
+    4. User has completed OTP verification
+    """
+    from models.user import User
+    from fastapi import HTTPException
+    from utils.audit_logger import AuditLogger
+
     token = credentials.credentials
     payload = JWTHandler.decode_access_token(token)
+
+    # Get user_id from token
+    user_id = payload.get("id")
+    if not user_id:
+        AuditLogger.log_unauthorized_access(reason="Invalid token: user_id not found")
+        raise HTTPException(
+            status_code=401,
+            detail={"message": "Invalid token: user_id not found", "status": False},
+        )
+
+    # Fetch user from database to check current status
+    user = User.get_by_id(user_id)
+
+    if not user:
+        AuditLogger.log_unauthorized_access(
+            user_id=user_id, reason="User not found in database"
+        )
+        raise HTTPException(
+            status_code=401, detail={"message": "User not found", "status": False}
+        )
+
+    # Check if user account is active
+    if user.status != "active":
+        AuditLogger.log_unauthorized_access(
+            user_id=user_id,
+            user_email=user.email,
+            reason=f"Account status is '{user.status}' (not active)",
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Account is not active. Please contact support.",
+                "status": False,
+            },
+        )
+
+    # Check if user has completed OTP verification
+    if not user.is_otp_verified:
+        AuditLogger.log_unauthorized_access(
+            user_id=user_id, user_email=user.email, reason="OTP not verified"
+        )
+        raise HTTPException(
+            status_code=403,
+            detail={
+                "message": "Please verify your phone number to continue",
+                "status": False,
+            },
+        )
+
     return payload
 
 
@@ -88,3 +153,7 @@ CommonRouter.include_router(ndr_router)
 CommonRouter.include_router(courier_allocation_router)
 CommonRouter.include_router(billing_invoice_router)
 CommonRouter.include_router(channel_router)
+# Shopify OAuth endpoints (initiate OAuth flow only)
+CommonRouter.include_router(shopify_oauth_integration_router)
+# Shopify management endpoints (pause, resume, sync, webhooks cleanup, etc.)
+CommonRouter.include_router(shopify_management_integration_router)

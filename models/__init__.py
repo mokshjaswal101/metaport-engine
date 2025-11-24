@@ -56,6 +56,12 @@ from .client_onboarding_details import Client_Onboarding_Details
 # from .client_bank_details import Client_Bank_Details
 from .client_onboarding import Client_Onboarding
 
+# OTP Verification
+from .otp_verification import OTP_Verification
+
+# Audit Logs
+from .audit_log import AuditLog
+
 from .billing_invoice import Billing_Invoice
 
 from .market_place import Market_Place

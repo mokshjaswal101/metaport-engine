@@ -5,6 +5,7 @@ from sqlalchemy import desc
 from datetime import datetime, timezone
 import os
 from psycopg2 import DatabaseError
+from typing import Dict, Any, Optional
 
 from context_manager.context import context_user_data, get_db_session
 from logger import logger
@@ -19,6 +20,9 @@ from modules.orders.order_schema import Order_Model
 
 # service
 from modules.wallet_logs.wallet_logs_service import WalletLogsService
+
+# template manager
+from .whatsapp_template_manager import WhatsAppTemplateManager
 
 
 template_mapping = {
@@ -41,6 +45,112 @@ def get_product_summary(products):
 
 
 class WhatsappService:
+
+    # Facebook Graph API Configuration
+    GRAPH_API_VERSION = "v22.0"
+    PHONE_NUMBER_ID = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
+    ACCESS_TOKEN = os.getenv("WHATSAPP_ACCESS_TOKEN", "")
+    GRAPH_API_BASE_URL = f"https://graph.facebook.com/{GRAPH_API_VERSION}"
+
+    @staticmethod
+    def send_otp_via_whatsapp(phone_number: str, otp_code: str) -> Dict[str, Any]:
+        """
+        Send OTP verification message via WhatsApp using Facebook Graph API.
+
+        Args:
+            phone_number: Recipient phone number (10 digits without country code)
+            otp_code: 6-digit OTP code
+
+        Returns:
+            dict: Response with status and message details
+        """
+        try:
+            # Ensure phone number has country code (91 for India)
+            if not phone_number.startswith("91"):
+                phone_number = f"91{phone_number}"
+
+            # Check if access token is configured
+            if not WhatsappService.ACCESS_TOKEN:
+                logger.error(
+                    "WhatsApp Access Token not configured in environment variables"
+                )
+                return {
+                    "status": False,
+                    "message": "WhatsApp service not configured",
+                    "error": "Missing access token",
+                }
+
+            # Build API URL
+            url = f"{WhatsappService.GRAPH_API_BASE_URL}/{WhatsappService.PHONE_NUMBER_ID}/messages"
+
+            # Get template payload from template manager
+            payload = WhatsAppTemplateManager.get_otp_template(
+                otp_code=otp_code, phone_number=phone_number
+            )
+
+            # Set headers
+            headers = {
+                "Authorization": f"Bearer {WhatsappService.ACCESS_TOKEN}",
+                "Content-Type": "application/json",
+            }
+
+            # Log request (without sensitive data)
+            logger.info(f"Sending WhatsApp OTP to: {phone_number}")
+
+            # Send request to Facebook Graph API
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
+
+            # Parse response
+            response_data = response.json()
+
+            # Check if request was successful
+            if response.status_code == 200:
+                logger.info(f"WhatsApp OTP sent successfully to {phone_number}")
+                return {
+                    "status": True,
+                    "message": "OTP sent successfully via WhatsApp",
+                    "phone_number": phone_number,
+                    "message_id": response_data.get("messages", [{}])[0].get("id"),
+                    "response": response_data,
+                }
+            else:
+                error_message = response_data.get("error", {}).get(
+                    "message", "Unknown error"
+                )
+                logger.error(
+                    f"Failed to send WhatsApp OTP to {phone_number}. "
+                    f"Status: {response.status_code}, Error: {error_message}"
+                )
+                return {
+                    "status": False,
+                    "message": f"Failed to send OTP via WhatsApp: {error_message}",
+                    "error": response_data,
+                    "status_code": response.status_code,
+                }
+
+        except requests.exceptions.Timeout:
+            logger.error(f"Timeout while sending WhatsApp OTP to {phone_number}")
+            return {
+                "status": False,
+                "message": "Request timeout while sending OTP",
+                "error": "Timeout",
+            }
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request error while sending WhatsApp OTP: {str(e)}")
+            return {
+                "status": False,
+                "message": f"Failed to send OTP: {str(e)}",
+                "error": str(e),
+            }
+
+        except Exception as e:
+            logger.error(f"Unexpected error while sending WhatsApp OTP: {str(e)}")
+            return {
+                "status": False,
+                "message": f"An unexpected error occurred: {str(e)}",
+                "error": str(e),
+            }
 
     @staticmethod
     def send_message(order: Order_Model, notification_type: str):

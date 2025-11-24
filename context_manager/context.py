@@ -2,6 +2,7 @@ from contextvars import ContextVar
 from fastapi import Depends, Request
 from sqlalchemy.orm import Session
 from logger import logger
+from typing import Optional
 
 # models
 from database.db import get_db
@@ -24,4 +25,6 @@ async def build_request_context(db: Session = Depends(get_db)):
 # get the same session everywhere
 # the db session is stored in context at the time of the building request context
 def get_db_session() -> Session:
-    return context_db_session.get()
+    session = context_db_session.get()
+
+    return session
