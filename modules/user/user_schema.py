@@ -1,6 +1,7 @@
 from pydantic import BaseModel, validator, EmailStr
 from typing import Optional
 from enum import Enum
+import re
 
 # schema
 from schema.base import DBBaseModel
@@ -13,6 +14,7 @@ class UserBaseModel(BaseModel):
     phone: str
 
     extra_credentials: str = ""
+    is_otp_verified: bool = False
 
 
 class UserStatus(str, Enum):
@@ -76,3 +78,32 @@ class UserModel(DBBaseModel, UserBaseModel):
 class ChangePasswordModel(BaseModel):
     old_password: str
     new_password: str
+
+
+# OTP-related schemas
+class OTPVerifyRequestModel(BaseModel):
+    otp: str
+
+    @validator("otp", pre=True)
+    def sanitize_otp(cls, v):
+        """Sanitize OTP: remove whitespace and keep only digits."""
+        if isinstance(v, str):
+            # Remove all non-digit characters
+            return re.sub(r'\D', '', v.strip())
+        return v
+
+
+class PhoneNumberUpdateModel(BaseModel):
+    phone_number: str
+
+    @validator("phone_number", pre=True)
+    def sanitize_phone_number(cls, v):
+        """Sanitize phone number: remove all non-digit characters and validate length."""
+        if isinstance(v, str):
+            # Remove all non-digit characters
+            digits_only = re.sub(r'\D', '', v.strip())
+            # Validate it's exactly 10 digits
+            if len(digits_only) == 10:
+                return digits_only
+            return v.strip()
+        return v

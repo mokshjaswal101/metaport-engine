@@ -9,8 +9,6 @@ from context_manager.context import context_user_data, get_db_session
 from models import (
     Client,
     Order,
-    Client_Onboarding_Details,
-    # Client_Bank_Details,
 )
 
 # schema
@@ -19,8 +17,6 @@ from .client_schema import (
     ClientInsertModel,
     ClientResponseModel,
     CompleteClientDetailsModel,
-    ClientOnboardingDetailsModel,
-    ClientBankDetailsModel,
 )
 from modules.user.user_schema import UserInsertModel
 
@@ -173,123 +169,4 @@ class ClientService:
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An error occurred while creating the Client.",
-            )
-
-    @staticmethod
-    def get_complete_client_details() -> GenericResponseModel:
-        """
-        Get complete client details including onboarding details and bank details
-        """
-        try:
-            db = get_db_session()
-
-            client_id = context_user_data.get().client_id
-
-            # Get client data
-            client = db.query(Client).filter(Client.id == client_id).first()
-            if not client:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.NOT_FOUND,
-                    status=False,
-                    message="Client not found",
-                )
-
-            # Get client onboarding details
-            onboarding_details = (
-                db.query(Client_Onboarding_Details)
-                .filter(Client_Onboarding_Details.client_id == client_id)
-                .first()
-            )
-
-            # Get client bank details
-            # bank_details = (
-            #     db.query(Client_Bank_Details)
-            #     .filter(Client_Bank_Details.client_id == client_id)
-            #     .first()
-            # )
-
-            # Prepare response data
-            client_model = client.to_model()
-
-            onboarding_model = None
-            if onboarding_details:
-                onboarding_model = ClientOnboardingDetailsModel(
-                    id=onboarding_details.id,
-                    onboarding_user_id=onboarding_details.onboarding_user_id,
-                    client_id=onboarding_details.client_id,
-                    company_legal_name=onboarding_details.company_legal_name,
-                    company_name=onboarding_details.company_name,
-                    office_address=onboarding_details.office_address,
-                    landmark=onboarding_details.landmark,
-                    pincode=onboarding_details.pincode,
-                    city=onboarding_details.city,
-                    state=onboarding_details.state,
-                    country=onboarding_details.country,
-                    phone_number=onboarding_details.phone_number,
-                    email=onboarding_details.email,
-                    pan_number=onboarding_details.pan_number,
-                    upload_pan=onboarding_details.upload_pan,
-                    is_coi=onboarding_details.is_coi,
-                    coi=onboarding_details.coi,
-                    upload_coi=onboarding_details.upload_coi,
-                    is_gst=onboarding_details.is_gst,
-                    gst=onboarding_details.gst,
-                    upload_gst=onboarding_details.upload_gst,
-                    aadhar_card=onboarding_details.aadhar_card,
-                    upload_aadhar_card_front=onboarding_details.upload_aadhar_card_front,
-                    upload_aadhar_card_back=onboarding_details.upload_aadhar_card_back,
-                    is_cod_order=onboarding_details.is_cod_order,
-                    is_stepper=onboarding_details.is_stepper,
-                    is_company_details=onboarding_details.is_company_details,
-                    is_billing_details=onboarding_details.is_billing_details,
-                    is_term=onboarding_details.is_term,
-                    is_review=onboarding_details.is_review,
-                    is_form_access=onboarding_details.is_form_access,
-                )
-
-            # bank_model = None
-            # if bank_details:
-            #     bank_model = ClientBankDetailsModel(
-            #         id=bank_details.id,
-            #         user_id=bank_details.user_id,
-            #         client_id=bank_details.client_id,
-            #         client_onboarding_id=bank_details.client_onboarding_id,
-            #         beneficiary_name=bank_details.beneficiary_name,
-            #         bank_name=bank_details.bank_name,
-            #         account_no=bank_details.account_no,
-            #         account_type=bank_details.account_type,
-            #         ifsc_code=bank_details.ifsc_code,
-            #         upload_cheque=bank_details.upload_cheque,
-            #     )
-
-            complete_details = CompleteClientDetailsModel(
-                client_data=client_model,
-                onboarding_details=onboarding_model,
-                # bank_details=bank_model,
-            )
-
-            logger.info(
-                msg="Complete client details retrieved successfully for client_id {}".format(
-                    client_id
-                ),
-            )
-
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.OK,
-                status=True,
-                data=complete_details.dict(),
-                message="Complete client details retrieved successfully",
-            )
-
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error retrieving complete client details: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while retrieving complete client details.",
             )

@@ -56,6 +56,12 @@ from .client_onboarding_details import Client_Onboarding_Details
 # from .client_bank_details import Client_Bank_Details
 from .client_onboarding import Client_Onboarding
 
+# OTP Verification
+from .otp_verification import OTP_Verification
+
+# Audit Logs
+from .audit_log import AuditLog
+
 from .billing_invoice import Billing_Invoice
 
 from .market_place import Market_Place
@@ -70,5 +76,6 @@ from .new_company_to_client_rate import New_Company_To_Client_Rate
 from .channel_master import ChannelMaster
 from .client_channel_integration import ClientChannelIntegration
 from .integration_sync_log import IntegrationSyncLog
+from .integration_audit_log import IntegrationAuditLog
 
 from .courier_billing import CourierBilling

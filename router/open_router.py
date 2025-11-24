@@ -29,7 +29,7 @@ from shipping_partner.zippyy.zippyy_controller import zippyy_router
 
 from modules.shipment.shipment_controller import track_router
 
-from modules.whatsapp.whatsapp_controller import whatsapp_router
+from modules.user.user_controller import user_router
 
 
 # create a comming master router for all the routes in the service
@@ -61,4 +61,4 @@ OpenRouter.include_router(blitz_router)
 OpenRouter.include_router(bluedart_router)
 OpenRouter.include_router(zippyy_router)
 
-OpenRouter.include_router(whatsapp_router)
+OpenRouter.include_router(user_router)  # Includes OTP endpoints: /user/otp/*

@@ -1,4 +1,4 @@
-from sqlalchemy import Column, String, Integer, ForeignKey, Boolean
+from sqlalchemy import Column, String, Integer, ForeignKey, Boolean, Index, func, text
 from sqlalchemy.orm import relationship, Session
 
 from database import DBBaseClass, DBBase
@@ -12,14 +12,23 @@ class Client(DBBase, DBBaseClass):
     client_name = Column(String(255), nullable=False)
     client_code = Column(String(255), nullable=False)
 
-    is_onboarding_completed = Column(Boolean, default=False, nullable=False)
-
     company_id = Column(Integer, ForeignKey("company.id"), nullable=False)
 
     # relationships
     company = relationship("Company", back_populates="clients", lazy="noload")
     users = relationship("User", back_populates="client", lazy="noload")
     orders = relationship("Order", back_populates="client", lazy="noload")
+
+    # Indexes and unique constraints
+    __table_args__ = (
+        # Unique constraint for client_name (case-insensitive) - prevents duplicate client names
+        Index(
+            'idx_client_name_unique',
+            text('LOWER(client_name)'),
+            unique=True,
+            postgresql_where=text('is_deleted = false')
+        ),
+    )
 
     # whenever a client is created, automatically create a company code for it as well
     def __init__(self, client_name, company_id):

@@ -12,8 +12,6 @@ class ClientModel(DBBaseModel):
     client_code: str
     company_id: int
 
-    is_onboarding_completed: bool = False
-
 
 class ClientInsertModel(BaseModel):
     clientName: str
@@ -102,7 +100,6 @@ class SignupwithOnboarding(BaseModel):
     phone_number: int
     email: EmailStr
     client_id: int
-    onboarding_user_id: int
 
 
 class OnboardingGetByStatus(BaseModel):
@@ -110,7 +107,6 @@ class OnboardingGetByStatus(BaseModel):
 
 
 class OnboardingActionSchema(BaseModel):
-    onboarding_id: int
     action: str
     remarks: Optional[str] = None
 
