@@ -27,17 +27,6 @@ from utils.audit_logger import AuditLogger
 
 
 class OTPHandler:
-    """
-    Complete OTP Handler for various use cases.
-
-    Use cases:
-    - User registration verification
-    - Login verification (2FA)
-    - Password reset
-    - Email verification
-    - Phone number change
-    - Sensitive operations confirmation
-    """
 
     # OTP Configuration
     OTP_LENGTH = 6
@@ -57,9 +46,6 @@ class OTPHandler:
     def _generate_otp() -> str:
         """
         Generate a 6-digit OTP code.
-
-        Returns:
-            str: 6-digit OTP code
         """
         otp = secrets.randbelow(900000) + 100000
         return str(otp)
@@ -68,9 +54,6 @@ class OTPHandler:
     def _get_otp_expiry_time() -> datetime:
         """
         Calculate OTP expiry time (current time + configured minutes).
-
-        Returns:
-            datetime: Expiry timestamp in UTC
         """
         expiry = datetime.now(UTC) + timedelta(minutes=OTPHandler.OTP_EXPIRY_MINUTES)
         return expiry
@@ -79,12 +62,6 @@ class OTPHandler:
     def _is_otp_expired(expires_at: datetime) -> bool:
         """
         Check if OTP has expired.
-
-        Args:
-            expires_at: OTP expiry timestamp
-
-        Returns:
-            bool: True if expired, False otherwise
         """
         current_time = datetime.now(UTC)
 
@@ -104,13 +81,6 @@ class OTPHandler:
     def _validate_otp_code(input_otp: str, stored_otp: str) -> bool:
         """
         Validate OTP code by comparing input with stored value.
-
-        Args:
-            input_otp: OTP code entered by user
-            stored_otp: OTP code stored in database
-
-        Returns:
-            bool: True if match, False otherwise
         """
         is_valid = input_otp.strip() == stored_otp.strip()
 
@@ -146,38 +116,20 @@ class OTPHandler:
 
         except ImportError as e:
             logger.error(f"Failed to import WhatsApp service: {str(e)}")
-            # Fallback to mock/log mode
-            logger.info("=" * 50)
-            logger.info("📱 SENDING OTP VIA SMS (FALLBACK - SERVICE UNAVAILABLE)")
-            logger.info(f"Phone Number: +91{phone_number}")
-            logger.info(
-                f"Message: Your Metaport verification code is {otp_code}. Valid for {OTPHandler.OTP_EXPIRY_MINUTES} minutes."
-            )
-            logger.info("=" * 50)
 
             return {
                 "status": True,
                 "message": "OTP sent successfully (fallback mode)",
                 "phone_number": phone_number,
-                "otp_code": otp_code,  # Remove in production
             }
 
         except Exception as e:
             logger.error(f"Error sending OTP via WhatsApp: {str(e)}")
-            # Fallback to mock/log mode
-            logger.info("=" * 50)
-            logger.info("📱 SENDING OTP VIA SMS (FALLBACK - ERROR)")
-            logger.info(f"Phone Number: +91{phone_number}")
-            logger.info(
-                f"Message: Your Metaport verification code is {otp_code}. Valid for {OTPHandler.OTP_EXPIRY_MINUTES} minutes."
-            )
-            logger.info("=" * 50)
 
             return {
                 "status": True,
                 "message": "OTP sent successfully (fallback mode)",
                 "phone_number": phone_number,
-                "otp_code": otp_code,  # Remove in production
             }
 
     @staticmethod
@@ -241,13 +193,6 @@ class OTPHandler:
     def _create_otp_data(user_id: int, otp_type: str) -> Dict[str, Any]:
         """
         Generate OTP data for database storage.
-
-        Args:
-            user_id: User ID
-            otp_type: Type of OTP (phone/email)
-
-        Returns:
-            dict: OTP data including code and expiry
         """
         otp_code = OTPHandler._generate_otp()
         expires_at = OTPHandler._get_otp_expiry_time()
@@ -396,8 +341,7 @@ class OTPHandler:
 
         except DatabaseError as e:
             logger.error(
-                msg=f"Database error during OTP generation: {str(e)}",
-                exc_info=True
+                msg=f"Database error during OTP generation: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -407,8 +351,7 @@ class OTPHandler:
 
         except Exception as e:
             logger.error(
-                msg=f"Unexpected error during OTP generation: {str(e)}",
-                exc_info=True
+                msg=f"Unexpected error during OTP generation: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -569,7 +512,7 @@ class OTPHandler:
             if mark_user_verified:
                 # Reload user from database to get latest state (prevent race condition)
                 try:
-                    if db and hasattr(db, 'refresh'):
+                    if db and hasattr(db, "refresh"):
                         db.refresh(user)
                 except Exception:
                     # If refresh fails, reload user from database
@@ -580,7 +523,7 @@ class OTPHandler:
                             status=False,
                             message="User not found.",
                         )
-                
+
                 # Check if user is already verified (concurrent verification protection)
                 if user.is_otp_verified:
                     logger.warning(
@@ -598,12 +541,12 @@ class OTPHandler:
                             "already_verified": True,
                         },
                     )
-                
+
                 # Update user verification status atomically
                 User.update_user_by_uuid(
                     user_uuid=user.uuid, update_dict={"is_otp_verified": True}
                 )
-                
+
                 # Verify the update was successful
                 updated_user = User.get_by_id(user_id)
                 if updated_user and not updated_user.is_otp_verified:
@@ -633,8 +576,7 @@ class OTPHandler:
 
         except RuntimeError as e:
             logger.error(
-                msg=f"Runtime error during OTP verification: {str(e)}",
-                exc_info=True
+                msg=f"Runtime error during OTP verification: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -644,8 +586,7 @@ class OTPHandler:
 
         except DatabaseError as e:
             logger.error(
-                msg=f"Database error during OTP verification: {str(e)}",
-                exc_info=True
+                msg=f"Database error during OTP verification: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -655,8 +596,7 @@ class OTPHandler:
 
         except AttributeError as e:
             logger.error(
-                msg=f"Attribute error during OTP verification: {str(e)}",
-                exc_info=True
+                msg=f"Attribute error during OTP verification: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -666,8 +606,7 @@ class OTPHandler:
 
         except Exception as e:
             logger.error(
-                msg=f"Unexpected error during OTP verification: {str(e)}",
-                exc_info=True
+                msg=f"Unexpected error during OTP verification: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -841,8 +780,7 @@ class OTPHandler:
 
         except DatabaseError as e:
             logger.error(
-                msg=f"Database error during phone update: {str(e)}",
-                exc_info=True
+                msg=f"Database error during phone update: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -852,8 +790,7 @@ class OTPHandler:
 
         except Exception as e:
             logger.error(
-                msg=f"Unexpected error during phone update: {str(e)}",
-                exc_info=True
+                msg=f"Unexpected error during phone update: {str(e)}", exc_info=True
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
