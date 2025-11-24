@@ -2,13 +2,13 @@ import http
 from psycopg2 import DatabaseError
 from sqlalchemy import func, case, cast
 from sqlalchemy.types import DateTime
+from datetime import datetime, timedelta
 
 from logger import logger
 from context_manager.context import context_user_data, get_db_session
 
 # models
 from models import Order
-
 
 # schema
 from schema.base import GenericResponseModel
@@ -21,9 +21,10 @@ class DashboardService:
     def get_performance_data(filters: dashboard_filters) -> GenericResponseModel:
 
         try:
-
             db = get_db_session()
-
+            today = datetime.now().date()
+            start_of_today = datetime.combine(today, datetime.min.time())
+            end_of_today = datetime.combine(today, datetime.max.time())
             start_date = filters.start_date
             end_date = filters.end_date
 
@@ -57,10 +58,48 @@ class DashboardService:
                 cast(Order.booking_date, DateTime) <= end_date,
             )
 
+            todays_query = db.query(
+                func.count().label("total_orders"),
+                func.sum(
+                    case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
+                ).label("booked"),
+                func.sum(
+                    case(
+                        (
+                            Order.status.in_(["in transit", "NDR", "out for delivery"]),
+                            1,
+                        ),
+                        else_=0,
+                    )
+                ).label("in_transit"),
+                func.sum(case((Order.status == "delivered", 1), else_=0)).label(
+                    "delivered"
+                ),
+                func.sum(case((Order.status == "RTO", 1), else_=0)).label("rto"),
+            ).filter(
+                Order.client_id == client_id,
+                Order.status != "cancelled",
+                Order.status != "new",
+                Order.is_deleted == False,
+                cast(Order.booking_date, DateTime) >= start_of_today,
+                cast(Order.booking_date, DateTime) <= end_of_today,
+            )
+
+            today_stats = todays_query.one()
+
+            todays_snapshot_dict = {
+                "total_orders": today_stats.total_orders or 0,
+                "booked": today_stats.booked or 0,
+                "in_transit": today_stats.in_transit or 0,
+                "delivered": today_stats.delivered or 0,
+                "rto": today_stats.rto or 0,
+            }
+
             overall_stats = query.one()
 
             # Compute percentages
             total_completed = (overall_stats.delivered or 0) + (overall_stats.rto or 0)
+
             delivery_percentage = round(
                 (
                     (overall_stats.delivered / total_completed) * 100
@@ -92,10 +131,7 @@ class DashboardService:
                     func.count().label("total_orders"),
                     func.sum(
                         case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
+                            (Order.status.in_(["booked", "pickup"]), 1),
                             else_=0,
                         )
                     ).label("booked"),
@@ -124,12 +160,11 @@ class DashboardService:
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.courier_partner)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 couriers
+                .order_by(func.count().desc())
+                .limit(10)
                 .all()
             )
 
-            # Convert courier_stats to list of dictionaries
             courier_stats_list = [
                 {
                     "courier_partner": row.courier_partner,
@@ -159,19 +194,13 @@ class DashboardService:
                 for row in courier_stats
             ]
 
-            # Zone-wise aggregation (LIMIT 10)
+            # Zone-wise stats
             zone_stats = (
                 db.query(
                     Order.zone,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -198,11 +227,11 @@ class DashboardService:
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.zone)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
+                .order_by(func.count().desc())
+                .limit(10)
                 .all()
             )
-            # Convert zone_stats to list of dictionaries
+
             zone_stats_list = [
                 {
                     "zone": row.zone,
@@ -232,19 +261,13 @@ class DashboardService:
                 for row in zone_stats
             ]
 
-            # City_wise Performance
+            # City-wise stats
             city_stats = (
                 db.query(
                     Order.consignee_city,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -271,12 +294,11 @@ class DashboardService:
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.consignee_city)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
+                .order_by(func.count().desc())
+                .limit(10)
                 .all()
             )
 
-            # Convert zone_stats to list of dictionaries
             city_stats_list = [
                 {
                     "city": row.consignee_city,
@@ -306,19 +328,13 @@ class DashboardService:
                 for row in city_stats
             ]
 
-            # state_wise Performance
+            # State-wise stats
             state_stats = (
                 db.query(
                     Order.consignee_state,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -345,12 +361,11 @@ class DashboardService:
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.consignee_state)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
+                .order_by(func.count().desc())
+                .limit(10)
                 .all()
             )
 
-            # Convert zone_stats to list of dictionaries
             state_stats_list = [
                 {
                     "state": row.consignee_state,
@@ -380,19 +395,13 @@ class DashboardService:
                 for row in state_stats
             ]
 
-            # state_wise Performance
+            # Pincode-wise stats
             pincode_stats = (
                 db.query(
                     Order.consignee_pincode,
                     func.count().label("total_orders"),
                     func.sum(
-                        case(
-                            (
-                                Order.status.in_(["booked", "pickup"]),
-                                1,
-                            ),
-                            else_=0,
-                        )
+                        case((Order.status.in_(["booked", "pickup"]), 1), else_=0)
                     ).label("booked"),
                     func.sum(
                         case(
@@ -419,12 +428,11 @@ class DashboardService:
                     cast(Order.booking_date, DateTime) <= end_date,
                 )
                 .group_by(Order.consignee_pincode)
-                .order_by(func.count().desc())  # Sort by total_orders DESC
-                .limit(10)  # Limit to max 10 zones
+                .order_by(func.count().desc())
+                .limit(10)
                 .all()
             )
 
-            # Convert zone_stats to list of dictionaries
             pincode_stats_list = [
                 {
                     "pincode": row.consignee_pincode,
@@ -454,17 +462,17 @@ class DashboardService:
                 for row in pincode_stats
             ]
 
-            # Correct response structure
+            # Final response
             data = {
                 "overall_stats": overall_stats_dict,
                 "courier_wise_stats": courier_stats_list,
+                "todays_snapshot": todays_snapshot_dict,
                 "zone_wise_stats": zone_stats_list,
                 "city_wise_stats": city_stats_list,
                 "state_wise_stats": state_stats_list,
                 "pincode_wise_stats": pincode_stats_list,
             }
 
-            # Return response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 status=True,
@@ -473,25 +481,20 @@ class DashboardService:
             )
 
         except DatabaseError as e:
-            # Log database error
             logger.error(
                 extra=context_user_data.get(),
                 msg="Error creating Order: {}".format(str(e)),
             )
-
-            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Could not login user, please try again.",
             )
 
         except Exception as e:
-            # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
                 msg="Unhandled error: {}".format(str(e)),
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
