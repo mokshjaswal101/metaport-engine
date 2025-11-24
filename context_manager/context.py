@@ -28,3 +28,16 @@ def get_db_session() -> Session:
     session = context_db_session.get()
 
     return session
+
+
+# Helper function to safely get user data from context
+def get_user_data():
+    """
+    Safely get user data from context.
+    Returns None if context is not set or user data is invalid.
+    """
+    user_data = context_user_data.get()
+    # Check if user_data is None, empty string, or doesn't have required attributes
+    if not user_data or user_data == "" or not hasattr(user_data, 'client_id'):
+        return None
+    return user_data

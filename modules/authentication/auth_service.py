@@ -3,9 +3,7 @@ import json
 import os
 from psycopg2 import DatabaseError
 from sqlalchemy.exc import IntegrityError
-from fastapi.encoders import jsonable_encoder
 from logger import logger
-from sqlalchemy.orm import joinedload
 from decimal import Decimal
 from pydantic import ValidationError
 from context_manager.context import context_user_data, get_db_session
@@ -17,10 +15,6 @@ from modules.user.user_service import UserService
 from models import (
     User,
     Client,
-    Company,
-    Company_To_Client_Contract,
-    New_Company_To_Client_Rate,
-    Client_Onboarding,
     Wallet,
 )
 
@@ -31,14 +25,11 @@ from modules.user.user_schema import (
     UserInsertModel,
 )
 
-# models
-# from models import Company_To_Client_Contract, New_Company_To_Client_Rate
 
 # utils
 from utils.jwt_token_handler import JWTHandler
 from utils.password_hasher import PasswordHasher
 from utils.audit_logger import AuditLogger
-from database.utils import get_uuid_by_primary_key
 
 
 class AuthService:
@@ -56,7 +47,6 @@ class AuthService:
             email = user_login_data.email
 
             # Fetch user with related company and client data in single query (eager loading)
-            # This avoids N+1 queries by loading all data in one query
             user, company_name, client_name = (
                 User.get_active_user_by_email_with_relations(email)
             )
@@ -69,7 +59,7 @@ class AuthService:
                 AuditLogger.log_login_failed(user_email=email, reason="User not found")
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.NOT_FOUND,
-                    message="New user! Please sign Up",
+                    message="Invalid Email Id or Password",
                     status=False,
                 )
 
@@ -84,14 +74,14 @@ class AuthService:
             if not is_valid_password:
                 logger.error(
                     extra=context_user_data.get(),
-                    msg=f"Invalid credentials",
+                    msg=f"Invalid Password",
                 )
                 AuditLogger.log_login_failed(
                     user_email=email, reason="Invalid password"
                 )
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.UNAUTHORIZED,
-                    message="Invalid Credentials",
+                    message="Invalid Email Id or Password",
                 )
 
             # Prepare user data for token and response
@@ -139,8 +129,6 @@ class AuthService:
             else:
                 token = JWTHandler.create_access_token(user_data)
 
-            # Build complete user response data using eager-loaded relationship data
-            # No separate database queries needed - company_name and client_name already fetched
             updated_user_data = user_data.copy()
             updated_user_data.update(
                 {
@@ -172,7 +160,7 @@ class AuthService:
             logger.error(
                 extra=context_user_data.get(),
                 msg=f"Database error during login: {str(e)}",
-                exc_info=True
+                exc_info=True,
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -185,7 +173,11 @@ class AuthService:
                 extra=context_user_data.get(),
                 msg=f"Validation error during login: {str(e)}",
             )
-            first_error_msg = e.errors()[0].get("msg", "Invalid input data") if e.errors() else "Invalid input data"
+            first_error_msg = (
+                e.errors()[0].get("msg", "Invalid input data")
+                if e.errors()
+                else "Invalid input data"
+            )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.BAD_REQUEST,
                 status=False,
@@ -196,7 +188,7 @@ class AuthService:
             logger.error(
                 extra=context_user_data.get(),
                 msg=f"Unexpected error during login: {str(e)}",
-                exc_info=True
+                exc_info=True,
             )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
@@ -210,13 +202,13 @@ class AuthService:
     ) -> GenericResponseModel:
         """
         Register new client and user, create wallet, and return JWT token.
-        Uses database unique constraints to prevent race conditions.
         """
         db = get_db_session()
-        created_client = None
 
         try:
+            # fixed for now, can be used later when moving to aggregator model
             company_id = 1
+
             # Inputs are already sanitized by Pydantic validators
             client_name = client_data.client_name
             user_email = client_data.user_email
@@ -250,14 +242,16 @@ class AuthService:
                     client_name=client_name,
                     company_id=company_id,
                 )
-                created_client = Client.create_client(client_entity)
+                # Add client to database and flush to get the ID
+                db.add(client_entity)
+                db.flush()
 
                 logger.info(
                     msg=f"Client created successfully with email: {user_email}",
                 )
 
                 # Update user data with the created client ID
-                user_data.client_id = created_client.id
+                user_data.client_id = client_entity.id
 
                 # Create new user
                 new_user_response = UserService.create_user(user_data=user_data)
@@ -266,7 +260,7 @@ class AuthService:
                     logger.error(
                         msg=f"User creation failed for email: {user_email}, rolling back client",
                     )
-                    db.delete(created_client)
+                    db.delete(client_entity)
                     db.flush()
                     return new_user_response
 
@@ -275,7 +269,7 @@ class AuthService:
 
                 # Create default wallet for client
                 wallet = Wallet(
-                    client_id=created_client.id,
+                    client_id=client_entity.id,
                     cod_amount=Decimal(0),
                     amount=Decimal(0),
                     provisional_cod_amount=Decimal(0),
@@ -294,13 +288,12 @@ class AuthService:
 
                 # Determine which constraint was violated
                 error_msg = str(e).lower()
-                if "email" in error_msg or "idx_user_email_unique" in error_msg:
+                print("error_msg", error_msg)
+                if "idx_user_email_unique" in error_msg:
                     message = "A user with this email already exists"
-                elif "phone" in error_msg or "idx_user_phone_unique" in error_msg:
+                elif "idx_user_phone_unique" in error_msg:
                     message = "A user with this phone number already exists"
-                elif (
-                    "client_name" in error_msg or "idx_client_name_unique" in error_msg
-                ):
+                elif "idx_client_name_unique" in error_msg:
                     message = "Client with this name already exists"
                 else:
                     message = "This email or phone number is already registered"
@@ -327,7 +320,7 @@ class AuthService:
                 )
                 # Rollback the entire transaction
                 db.delete(wallet)
-                db.delete(created_client)
+                db.delete(client_entity)
                 db.rollback()
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.SERVICE_UNAVAILABLE,
@@ -348,7 +341,7 @@ class AuthService:
                 {
                     "is_otp_verified": False,
                     "company_name": client_name,
-                    "client_name": created_client.client_name,
+                    "client_name": client_entity.client_name,
                     "phone_number": user_dict["phone"],
                 }
             )
@@ -380,7 +373,7 @@ class AuthService:
             logger.error(
                 extra=context_user_data.get(),
                 msg=f"Database error during registration: {str(e)}",
-                exc_info=True
+                exc_info=True,
             )
             if db:
                 db.rollback()
@@ -397,7 +390,11 @@ class AuthService:
             )
             if db:
                 db.rollback()
-            first_error_msg = e.errors()[0].get("msg", "Invalid input data") if e.errors() else "Invalid input data"
+            first_error_msg = (
+                e.errors()[0].get("msg", "Invalid input data")
+                if e.errors()
+                else "Invalid input data"
+            )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.BAD_REQUEST,
                 status=False,
@@ -408,7 +405,7 @@ class AuthService:
             logger.error(
                 extra=context_user_data.get(),
                 msg=f"Unexpected error during registration: {str(e)}",
-                exc_info=True
+                exc_info=True,
             )
             if db:
                 db.rollback()
