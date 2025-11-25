@@ -1358,7 +1358,7 @@ class Xpressbees:
     #                         "orderNumber": "324324wdsfsd43538",
     #                         "awbNumber": "",
     #                         "subOrderNumber": "subOrderNumber",
-    #                         "customerPromiseDate": "22-11-2025 10:14:13",
+    #                         "customerPromiseDate": "24-11-2025 10:14:13",
     #                         "manifestId": "manifestId",
     #                         "collectableAmount": {"unit": "INR", "value": 299},
     #                         "declaredAmount": {"value": 51000, "unit": "INR"},
@@ -1373,7 +1373,7 @@ class Xpressbees:
     #                             "priorityRemarks": "PRIORITY_REMARKS",
     #                             "isPickupPriority": "1",
     #                             "pickupInstruction": None,
-    #                             "pickupSlotsDate": "22-11-2025 10:14:13",
+    #                             "pickupSlotsDate": "24-11-2025 10:14:13",
     #                         },
     #                         "packageDetails": {
     #                             "packageDimension": {
@@ -1783,7 +1783,7 @@ class Xpressbees:
                                 "orderNumber": "324324wdsfsd43538",
                                 "awbNumber": "",
                                 "subOrderNumber": "subOrderNumber",
-                                "customerPromiseDate": "22-11-2025 10:14:13",
+                                "customerPromiseDate": "24-11-2025 10:14:13",
                                 "manifestId": "manifestId",
                                 "collectableAmount": {"unit": "INR", "value": 299},
                                 "declaredAmount": {"value": 51000, "unit": "INR"},
@@ -1798,7 +1798,7 @@ class Xpressbees:
                                     "priorityRemarks": "PRIORITY_REMARKS",
                                     "isPickupPriority": "1",
                                     "pickupInstruction": None,
-                                    "pickupSlotsDate": "22-11-2025 10:14:13",
+                                    "pickupSlotsDate": "24-11-2025 10:14:13",
                                 },
                                 "packageDetails": {
                                     "packageDimension": {
@@ -2070,28 +2070,31 @@ class Xpressbees:
                         },
                         json=body,
                     )
-                print("123***")
+                print("123***", response.json())
 
                 response_data = response.json()
-
+                print("124***")
                 if response_data["code"] != 100:
+                    print("1245***")
                     print("error in dev_create_order")
                     return GenericResponseModel(
                         status_code=http.HTTPStatus.BAD_REQUEST,
                         message=response_data["message"],
                     )
-
+                print("1246***")
                 order.status = "booked"
                 order.sub_status = "booked"
                 order.courier_status = "BOOKED"
+                print("234***")
 
                 order.awb_number = response_data["data"][0]["AWBNo"]
                 order.aggregator = "xpressbees"
                 order.shipping_partner_order_id = response_data["data"][0][
                     "TokenNumber"
                 ]
+                print("235***")
                 order.courier_partner = delivery_partner.slug
-
+                print("236***")
                 new_activity = {
                     "event": "Shipment Created",
                     "subinfo": "delivery partner - " + str("xpressbees"),
@@ -2557,7 +2560,7 @@ class Xpressbees:
                             "orderNumber": "324324wdsfsd43538",
                             "awbNumber": "",
                             "subOrderNumber": "subOrderNumber",
-                            "customerPromiseDate": "22-11-2025 10:14:13",
+                            "customerPromiseDate": "24-11-2025 10:14:13",
                             "manifestId": "manifestId",
                             "collectableAmount": {"unit": "INR", "value": 299},
                             "declaredAmount": {"value": 51000, "unit": "INR"},
@@ -2572,7 +2575,7 @@ class Xpressbees:
                                 "priorityRemarks": "PRIORITY_REMARKS",
                                 "isPickupPriority": "1",
                                 "pickupInstruction": None,
-                                "pickupSlotsDate": "22-11-2025 10:14:13",
+                                "pickupSlotsDate": "24-11-2025 10:14:13",
                             },
                             "packageDetails": {
                                 "packageDimension": {

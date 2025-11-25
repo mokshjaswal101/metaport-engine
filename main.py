@@ -2,14 +2,13 @@ import uvicorn
 import asyncio
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
-from context_manager.context import get_db_session
 from fastapi.staticfiles import StaticFiles
-import os
+from context_manager.context import get_db_session
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 import json
+import os
 from logger import logger
-
 from pydantic import ValidationError
 from utils.exception_handler import (
     handle_validation_error,
@@ -19,8 +18,7 @@ from utils.exception_handler import (
 from router import CommonRouter, DefaultRouter, StatusRouter, OpenRouter
 from modules.authentication import auth_router
 
-from database import DBBase
-from database.db import init_models  # sync function
+from database.db import init_models  # sync DB init
 
 app = FastAPI()
 
@@ -44,25 +42,30 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-NUM_WORKERS = 14
-request_queue = asyncio.Queue()
-TIMEOUT_SECONDS = 30
+# Queue + worker config
+NUM_WORKERS = 20  # Number of parallel workers
+QUEUE_MAX_SIZE = 1000  # Maximum queue size
+TIMEOUT_SECONDS = 30  # Wait timeout before returning 503
+
+request_queue = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
 
 # Upload folder
-if not os.path.exists("uploads"):
-    os.makedirs("uploads")
-
+os.makedirs("uploads", exist_ok=True)
 app.mount("/uploads", StaticFiles(directory="uploads"), name="uploads")
 
 
+# -------------------------------
+# Worker to process requests
+# -------------------------------
 async def worker(worker_id: int):
     while True:
         request, call_next, response_future = await request_queue.get()
         try:
-            print(f"Worker-{worker_id} processing: {request.url}")
+            # Process the request
             response = await call_next(request)
             response_future.set_result(response)
-        except Exception:
+        except Exception as e:
+            logger.error(f"Worker-{worker_id} error: {str(e)}")
             response_future.set_result(
                 Response(content="Internal Server Error", status_code=500)
             )
@@ -70,17 +73,24 @@ async def worker(worker_id: int):
             request_queue.task_done()
 
 
+# -------------------------------
+# Startup event
+# -------------------------------
 @app.on_event("startup")
 async def startup_event():
-    # Run sync DB creation safely inside async event loop
     loop = asyncio.get_running_loop()
+    # Initialize DB safely in executor
     await loop.run_in_executor(None, init_models)
 
     # Start workers
     for i in range(NUM_WORKERS):
         asyncio.create_task(worker(i))
+    logger.info(f"Started {NUM_WORKERS} workers for request queue")
 
 
+# -------------------------------
+# Queue middleware
+# -------------------------------
 @app.middleware("http")
 async def queue_middleware(request: Request, call_next):
     response_future = asyncio.Future()
@@ -95,40 +105,59 @@ async def queue_middleware(request: Request, call_next):
     return await response_future
 
 
+# -------------------------------
+# Close DB connections properly
+# -------------------------------
 @app.middleware("http")
 async def close_idle_connections(request: Request, call_next):
-    """
-    DO NOT open a sync DB session directly in async code.
-    Use thread executor to avoid blocking event loop.
-    """
-
     loop = asyncio.get_running_loop()
     db = await loop.run_in_executor(None, get_db_session)
-
     try:
         request.state.db = db
         response = await call_next(request)
     finally:
         if db:
             await loop.run_in_executor(None, db.close)
-
     return response
 
 
+# -------------------------------
+# Validation error handler
+# -------------------------------
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(request: Request, exc: RequestValidationError):
     raw = (await request.body()).decode("utf-8", "ignore")
     logger.error("422 on %s\nBody: %s\nErrors: %s", request.url, raw, exc.errors())
-
     try:
         parsed = json.loads(raw) if raw else None
     except json.JSONDecodeError:
         parsed = raw
-
     return JSONResponse(
         status_code=422,
         content={"detail": exc.errors(), "body": parsed},
     )
+
+
+# -------------------------------
+# Optional: Global rate limiter
+# -------------------------------
+import time
+
+MAX_REQUESTS_PER_SECOND = 200
+WINDOW_SECONDS = 1
+request_timestamps = []
+
+
+@app.middleware("http")
+async def rate_limit_middleware(request: Request, call_next):
+    global request_timestamps
+    now = time.time()
+    # keep timestamps within 1 second
+    request_timestamps = [t for t in request_timestamps if now - t < WINDOW_SECONDS]
+    if len(request_timestamps) >= MAX_REQUESTS_PER_SECOND:
+        return JSONResponse({"detail": "Too many requests, slow down"}, status_code=429)
+    request_timestamps.append(now)
+    return await call_next(request)
 
 
 if __name__ == "__main__":
