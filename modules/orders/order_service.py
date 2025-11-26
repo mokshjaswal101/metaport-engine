@@ -1,5 +1,7 @@
 import http
 from uuid import uuid4
+from dateutil import parser as date_parser
+import base64
 
 from sqlalchemy import (
     or_,
@@ -33,6 +35,10 @@ import pytz
 from pydantic import BaseModel
 import re
 import requests
+import httpx
+import uuid
+import logging
+from urllib.parse import quote
 
 from context_manager.context import context_user_data, get_db_session
 from utils.error_excel_generator import ErrorExcelGenerator
@@ -126,6 +132,44 @@ def calculate_order_values(order_data):
     total_amount = round_to_2_decimal_place(total_amount)
 
     return order_value, total_amount
+
+
+# Helper functions
+def safe(value, default=None):
+    return value if value not in (None, "") else default
+
+
+def parse_numeric(value, default=0):
+    """Convert value to float safely. Returns default if conversion fails."""
+    try:
+        if value in (None, "", "NA"):
+            return default
+        return float(value)
+    except (ValueError, TypeError):
+        return default
+
+
+def parse_datetime(value):
+    """Convert string to datetime safely. Returns None if invalid."""
+    try:
+        if value in (None, "", "NA"):
+            return None
+        if isinstance(value, datetime):
+            return value
+        return date_parser.parse(value)
+    except Exception:
+        return None
+
+
+def parse_datetime_safe(value):
+    try:
+        if value:
+            # Try parsing string to datetime if needed
+            return parse_datetime(value)  # your existing parser
+        else:
+            return datetime.now(timezone.utc)  # fallback to current UTC
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 def get_next_wednesday(date):
@@ -926,76 +970,6 @@ class OrderService:
                 message="Internal server error",
             )
 
-    # @staticmethod
-    # def delete_order(order_id: str):
-
-    #     try:
-
-    #         with get_db_session() as db:
-
-    #             company_id = context_user_data.get().company_id
-    #             client_id = context_user_data.get().client_id
-
-    #             # Find the existing order from the db
-    #             order = (
-    #                 db.query(Order)
-    #                 .filter(
-    #                     Order.order_id == order_id,
-    #                     Order.company_id == company_id,
-    #                     Order.client_id == client_id,
-    #                 )
-    #                 .first()
-    #             )
-
-    #             # if order not found, throw an error
-    #             if order is None:
-    #                 return GenericResponseModel(
-    #                     status_code=http.HTTPStatus.BAD_REQUEST,
-    #                     data={"order_id": order.order_id},
-    #                     message="Order does not exist",
-    #                 )
-
-    #             if order.status != "new" and order.status != "cancelled":
-    #                 return GenericResponseModel(
-    #                     status_code=http.HTTPStatus.BAD_REQUEST,
-    #                     message="Order cannot be deleted",
-    #                 )
-
-    #             order.is_deleted = True
-
-    #             db.add(order)
-    #             db.commit()
-
-    #             return GenericResponseModel(
-    #                 status_code=http.HTTPStatus.OK,
-    #                 message="Order updated Successfully",
-    #                 status=True,
-    #             )
-
-    #     except DatabaseError as e:
-    #         # Log database error
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Error creating Order: {}".format(str(e)),
-    #         )
-
-    #         # Return error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An error occurred while creating the Order.",
-    #         )
-
-    #     except Exception as e:
-    #         # Log other unhandled exceptions
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Unhandled error: {}".format(str(e)),
-    #         )
-    #         # Return a general internal server error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An internal server error occurred. Please try again later.",
-    #         )
     @staticmethod
     async def delete_order(order_id: str) -> GenericResponseModel:
         try:
@@ -2592,6 +2566,342 @@ class OrderService:
                 await db.close()
 
     @staticmethod
+    async def get_easycom_token():
+        """
+        Hit EasyEcom API to fetch token.
+        """
+        try:
+            EASYCOM_TOKEN_URL = "https://api.easyecom.io/getApiToken"
+            payload = {"email": "jaidurgatraders866@gmail.com", "password": "Amol@2025"}
+
+            headers = {
+                "Content-Type": "application/json",
+                "Cookie": "XSRF-TOKEN=xxxx; laravel_session=xxxx; PHPSESSID=xxxx",
+            }
+
+            async with httpx.AsyncClient(timeout=20) as client:
+                response = await client.post(
+                    EASYCOM_TOKEN_URL, json=payload, headers=headers
+                )
+
+            # print("Easycom Response:", response.text)
+
+            if response.status_code != 200:
+                return {
+                    "status": False,
+                    "message": "Failed to fetch token",
+                    "api_response": response.text,
+                }
+
+            data = response.json()
+
+            token = data.get("token") or data.get("api_token")  # based on API structure
+
+            if not token:
+                return {
+                    "status": False,
+                    "message": "Token not found in API response",
+                    "api_response": data,
+                }
+
+            return {
+                "status": True,
+                "token": token,
+                "message": "Token fetched successfully",
+            }
+
+        except Exception as e:
+            return {"status": False, "message": str(e)}
+
+    @staticmethod
+    async def get_orders_from_easycom(api_token: str, start_date: str, end_date: str):
+        try:
+            EASYCOM_GET_ORDERS_URL = "https://api.easyecom.io/orders/V2/getAllOrders"
+            # Encode dates for URL
+            start_date_encoded = quote(start_date)
+            end_date_encoded = quote(end_date)
+
+            url = (
+                f"{EASYCOM_GET_ORDERS_URL}"
+                f"?api_token={api_token}"
+                f"&start_date={start_date_encoded}"
+                f"&end_date={end_date_encoded}"
+            )
+
+            headers = {
+                "Cookie": "XSRF-TOKEN=xxxx; laravel_session=xxxx; PHPSESSID=xxxx"
+            }
+
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(url, headers=headers)
+
+            data = response.json()
+
+            return {
+                "status": True,
+                "message": "Orders fetched successfully",
+                "orders": data,
+            }
+
+        except Exception as e:
+            logging.exception("Error while fetching Easycom orders")
+            return {"status": False, "message": str(e)}
+
+    @staticmethod
+    async def get_easyecom_order_details(invoice_id: str, api_token: str):
+        """
+        Fetch order details from EasyEcom V2 API
+        """
+        url = f"https://api.easyecom.io/orders/V2/getOrderDetails?api_token={api_token}&invoice_id={invoice_id}"
+
+        headers = {"Cookie": "XSRF-TOKEN=xxxx; laravel_session=xxxx; PHPSESSID=xxxx"}
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.get(url, headers=headers)
+            return response.json()
+
+    @staticmethod
+    async def add_carrier_credentials(
+        api_token: str, carrier_id: int, username: str, password: str, token: str
+    ):
+        """
+        Add or update carrier credentials in EasyEcom
+        """
+        url = f"https://api.easyecom.io/Credentials/addCarrierCredentials?api_token={api_token}"
+
+        payload = {
+            "carrier_id": carrier_id,
+            "username": username,
+            "password": password,
+            "token": token,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Cookie": ("XSRF-TOKEN=###" "laravel_session=###" "PHPSESSID=###"),
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            return response.json()
+
+    @staticmethod
+    async def assign_awb(
+        api_token: str,
+        invoice_id: str,
+        courier: str,
+        awb_num: str,
+        company_carrier_id: int,
+        shipping_label_path: str,  # Path to the PDF file
+        invoice_url: str,
+        origin_code: str,
+        destination_code: str,
+    ):
+        """
+        Assign AWB to an order in EasyEcom
+        """
+
+        # Convert PDF to base64
+        with open(shipping_label_path, "rb") as f:
+            shipping_label_base64 = base64.b64encode(f.read()).decode("utf-8")
+
+        url = f"https://api.easyecom.io/Carrier/assignAWB?api_token={api_token}"
+
+        payload = {
+            "invoiceId": invoice_id,
+            "courier": courier,
+            "awbNum": awb_num,
+            "companyCarrierId": company_carrier_id,
+            "shippingLabelUrl": shipping_label_base64,
+            "invoiceUrl": invoice_url,
+            "origin_code": origin_code,
+            "destination_code": destination_code,
+        }
+
+        headers = {
+            "Content-Type": "application/json",
+            "Cookie": ("XSRF-TOKEN=###" "laravel_session=###" "PHPSESSID=###"),
+        }
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            response = await client.post(url, json=payload, headers=headers)
+            return response.json()
+
+    @staticmethod
+    async def sync_orders_from_easycom():
+        # time.sleep(3)
+        print("welcome to sync order")
+        # GET TOKEN FROM EASYCOM THIS IS REAL TIME TOKEN BUT YOU CAN USE STATIC TOKEN AS WELL BECAUSE TOKEN VALIDITY IS LONG IF NOT VALID THEN FETCH NEW TOKEN
+        # response = await OrderService.get_easycom_token()
+        # print("response=>", response["api_response"]["data"]["api_token"])
+        api_token = "c04b200bec738367faf360cce33a4e078f1cdce399cf7efc64da1899983e8fbd"
+
+        start_date = "2025-11-20 00:00:00"
+        end_date = "2025-11-27 00:00:00"
+
+        result = await OrderService.get_orders_from_easycom(
+            api_token, start_date, end_date
+        )
+        # print(result["orders"]["data"]["orders"], "welcome>")
+        easycom_orders = result["orders"]["data"]["orders"]
+
+        mapped_orders = []
+
+        for request in easycom_orders:
+            suborders = request.get("suborders", [])
+            products = []
+
+            for product in suborders:
+                products.append(
+                    {
+                        "name": safe(product.get("productName"), "Unknown Product"),
+                        "sku_code": safe(product.get("sku"), "NO-SKU"),
+                        "quantity": parse_numeric(product.get("item_quantity"), 1),
+                        "unit_price": parse_numeric(
+                            product.get("mrp") or product.get("selling_price"), 0
+                        ),
+                    }
+                )
+
+            # Calculate order value
+            order_value = sum(
+                parse_numeric(p.get("item_quantity"), 1)
+                * parse_numeric(p.get("mrp") or p.get("selling_price"), 0)
+                for p in suborders
+            )
+
+            body = {
+                # Consignee details
+                "consignee_full_name": safe(request.get("customer_name"), "No Name"),
+                "consignee_phone": safe(request.get("contact_num"), "9999999999"),
+                "consignee_email": safe(request.get("email"), "noemail@example.com"),
+                "consignee_address": safe(
+                    request.get("address_line_1"), "Address Missing"
+                ),
+                "consignee_landmark": safe(
+                    request.get("address_line_2"), "Landmark Missing"
+                ),
+                "consignee_pincode": safe(request.get("pin_code"), "000000"),
+                "consignee_city": safe(request.get("city"), "Unknown City"),
+                "consignee_state": safe(request.get("state"), "Unknown State"),
+                "consignee_country": "India",
+                # Order details
+                "order_id": str(
+                    safe(request.get("reference_code"), f"ORDER-{uuid.uuid4().hex[:6]}")
+                ),
+                "order_date": parse_datetime_safe(request.get("order_date")),
+                "channel": "easyecom",
+                "order_type": "B2C",
+                "billing_is_same_as_consignee": True,
+                "products": products,
+                "payment_mode": (
+                    "prepaid" if request.get("payment_mode_id") == 5 else "COD"
+                ),
+                "total_amount": parse_numeric(request.get("total_amount")),
+                "order_value": order_value,
+                "client_id": 2,
+                "company_id": 1,
+                "source": "easyecom",
+                "marketplace_order_id": str(safe(request.get("invoice_id"), "0")),
+                "status": "new",
+                "sub_status": "new",
+                # Package dimensions
+                "length": parse_numeric(request.get("Package Length")),
+                "breadth": parse_numeric(request.get("Package Width")),
+                "height": parse_numeric(request.get("Package Height")),
+                "weight": parse_numeric(request.get("Package Weight")),
+                "volumetric_weight": parse_numeric(request.get("volumetric_weight")),
+                "applicable_weight": parse_numeric(request.get("applicable_weight")),
+                # Charges
+                "discount": parse_numeric(request.get("discount")),
+                "tax_amount": parse_numeric(request.get("total_tax")),
+                "shipping_charges": parse_numeric(
+                    request.get("total_shipping_charge"), 0
+                ),
+                "cod_charges": parse_numeric(request.get("cod_charges"), 0),
+                "gift_wrap_charges": parse_numeric(request.get("gift_wrap_charges"), 0),
+                "other_charges": parse_numeric(request.get("other_charges"), 0),
+                # Additional info
+                "tracking_info": [],
+                "action_history": [],
+                "invoice_number": str(safe(request.get("invoice_number"), "")),
+                "eway_bill_number": str(safe(request.get("eway_bill_number"), "")),
+                "pickup_location_code": "0005",  # str(safe(request.get("location_key"), "005")),ur61332503716
+                "zone": "",
+                "product_quantity": parse_numeric(request.get("order_quantity"), 1),
+            }
+
+            mapped_orders.append(body)
+
+        print(mapped_orders[0]["marketplace_order_id"], "<mapped_orders>")
+        async with get_db_session() as db:  # use async with
+            # Fetch order
+            result = await db.execute(
+                select(Order).filter_by(order_id=str(body["order_id"]), client_id=2)
+            )
+            new_order = result.scalars().first()
+
+            # mapped_orders[0]["marketplace_order_id"]
+
+            if not new_order:
+                print("welcome to new order")
+                new_order = Order.create_db_entity(body)
+                db.add(new_order)
+                await db.commit()
+                await db.refresh(new_order)  # ensures all fields are updated from DB
+                print("Last inserted ID:", new_order.id)  # access the primary key
+
+                # Fetch order info (if needed)
+                # NOTE = I HAVE  ADDED `invoice_id` INVOICE ID STATIC YOU CAN CHANGE ACCORDING TO YOUR REQUIREMENT
+                # result = await OrderService.get_easyecom_order_details(
+                #     invoice_id=str(mapped_orders[0]["marketplace_order_id"]),
+                #     api_token=api_token,
+                # )
+                # print(result, "GET ORDER INFO")
+
+                # ADD CARRIER CREDENTIALS  THIS IS OPTIONAL YOU CAN REMOVE IF NOT NEEDED BECAUSE ON MY ACCOUNT I HAVE ADDED CARRIER CERDENTIALS
+                # result = await OrderService.add_carrier_credentials(
+                #     api_token="c04b200bec738367faf360cce33a4e078f1cdce399cf7efc64da1899983e8fbd",
+                #     carrier_id=5859, #THIS IS STATICALLY USER NAME I HAVE GIVEN
+                #     username="dummy", #THIS IS STATICALLY USER NAME I HAVE GIVEN
+                #     password="dummy", #THIS IS STATICALLY USER NAME I HAVE GIVEN
+                #     token=api_token
+                # )
+
+                # WHEN I HIT THIS I GET RESPONSE AS BELOW
+                # {
+                # "code": 200,
+                # "message": "Successfully added the Courier with carrier_id 5859",
+                # "data": {
+                # "webhookToken": "NPzKOzOW3J4U_247654_5859",
+                # "webhookUrl": "https://webhook.easyecom.io/webhook/UpdateTrackingStatus?carrier_token=NPzKOzOW3J4U_247654_5859",
+                # "companyCarrierId": 174519
+                # }
+                # }
+
+                # result = await OrderService.assign_awb(
+                #     api_token=api_token,
+                #     invoice_id=mapped_orders[0]["marketplace_order_id"], #I HAVE ENTER THIS STATICALY YOU CAN CHANGE ACCORDING REG.
+                #     courier="Handover", #THIS IS COURIER NAME WHICH HAVE SHIP THE ORDER
+                #     awb_num="89078766788", #THIS IS AWB NUMBER WHICH COMES FROM COURIER
+                #     company_carrier_id=174519, #THIS IS STATIC ID WHICH COMES WHEN YOU ADD CARRIER CREDENTIALS `companyCarrierId`
+                #     shipping_label_path="path/to/shipping_label.pdf", # Path to your shipping label PDF
+                #     invoice_url="https://s3-us-west-2.amazonaws.com/ee-uploaded-files-oregon/NewMarketplaceInvoice/8/62838396.pdf?request-content-type=application/force-download", #THIS IS INVOICE URL WHICH COMES FROM COURIER API RESPONSE
+                #     origin_code="65489", #THIS IS ORIGI N CODE I HAVE ENTERED IT STATICALY
+                #     destination_code="165489" #THIS IS DESTINATION I HAVE ENTERED IT STATICALY
+                # )
+
+                # print(result)
+
+            else:
+                print("Order already exists", new_order.order_id)
+        return GenericResponseModel(
+            status=True,
+            status_code=http.HTTPStatus.OK,
+            message="synced successfully",
+        )
+
+    @staticmethod
     def dev_cancel_awbs():
 
         time.sleep(3)
@@ -2600,158 +2910,6 @@ class OrderService:
             status_code=http.HTTPStatus.OK,
             message="cancelled successfully",
         )
-
-    # @staticmethod
-    # def get_previous_orders(order_id: str, page_number: int = 1, batch_size: int = 10):
-    #     """
-    #     Get previous orders for the same phone number as the given order ID with pagination
-    #     """
-    #     try:
-    #         with get_db_session() as db:
-    #             company_id = context_user_data.get().company_id
-    #             client_id = context_user_data.get().client_id
-
-    #             # First, get the current order to extract the phone number
-    #             current_order = (
-    #                 db.query(Order)
-    #                 .filter(
-    #                     Order.order_id == order_id,
-    #                     Order.company_id == company_id,
-    #                     Order.client_id == client_id,
-    #                     Order.is_deleted == False,
-    #                 )
-    #                 .first()
-    #             )
-
-    #             if not current_order:
-    #                 return GenericResponseModel(
-    #                     status_code=http.HTTPStatus.NOT_FOUND,
-    #                     message="Order not found",
-    #                     status=False,
-    #                 )
-
-    #             if not current_order.consignee_phone:
-    #                 return GenericResponseModel(
-    #                     status_code=http.HTTPStatus.BAD_REQUEST,
-    #                     message="Order does not have a phone number",
-    #                     status=False,
-    #                 )
-
-    #             # Build base query for previous orders
-    #             base_query = db.query(Order).filter(
-    #                 Order.consignee_phone == current_order.consignee_phone,
-    #                 Order.company_id == company_id,
-    #                 Order.client_id == client_id,
-    #                 Order.is_deleted == False,
-    #                 Order.order_id != order_id,  # Exclude current order
-    #             )
-
-    #             # Get status counts for previous orders
-    #             status_count_query = (
-    #                 db.query(Order.status, func.count(Order.id))
-    #                 .filter(
-    #                     Order.consignee_phone == current_order.consignee_phone,
-    #                     Order.company_id == company_id,
-    #                     Order.client_id == client_id,
-    #                     Order.is_deleted == False,
-    #                     Order.order_id != order_id,  # Exclude current order
-    #                 )
-    #                 .group_by(Order.status)
-    #                 .all()
-    #             )
-
-    #             # Initialize status counts
-    #             status_counts = {status: count for status, count in status_count_query}
-
-    #             # Group statuses into 3 main categories
-    #             rto_count = status_counts.get("rto_delivered", 0) + status_counts.get(
-    #                 "rto", 0
-    #             )
-    #             delivered_count = status_counts.get("delivered", 0)
-    #             other_count = sum(
-    #                 count
-    #                 for status, count in status_counts.items()
-    #                 if status not in ["rto_delivered", "rto", "delivered"]
-    #             )
-
-    #             # Create categorized status counts
-    #             categorized_status_counts = {
-    #                 "rto": rto_count,
-    #                 "delivered": delivered_count,
-    #                 "others": other_count,
-    #                 "total": sum(status_counts.values()),
-    #             }
-
-    #             # Get total count for pagination
-    #             total_count = base_query.count()
-
-    #             # Apply pagination and sorting
-    #             offset_value = (page_number - 1) * batch_size
-    #             previous_orders = (
-    #                 base_query.options(joinedload(Order.pickup_location))
-    #                 .order_by(
-    #                     desc(Order.order_date), desc(Order.created_at), desc(Order.id)
-    #                 )
-    #                 .offset(offset_value)
-    #                 .limit(batch_size)
-    #                 .all()
-    #             )
-
-    #             # Convert to response format
-    #             previous_orders_response = []
-    #             for order in previous_orders:
-    #                 order_dict = order.to_model().model_dump()
-    #                 previous_orders_response.append(Order_Response_Model(**order_dict))
-
-    #             # Calculate pagination info
-    #             total_pages = (total_count + batch_size - 1) // batch_size
-    #             has_next = page_number < total_pages
-    #             has_prev = page_number > 1
-
-    #             return GenericResponseModel(
-    #                 status_code=http.HTTPStatus.OK,
-    #                 message="Previous orders fetched successfully",
-    #                 data={
-    #                     "current_order_id": order_id,
-    #                     "phone_number": current_order.consignee_phone,
-    #                     "previous_orders": previous_orders_response,
-    #                     "status_counts": categorized_status_counts,
-    #                     "pagination": {
-    #                         "current_page": page_number,
-    #                         "batch_size": batch_size,
-    #                         "total_count": total_count,
-    #                         "total_pages": total_pages,
-    #                         "has_next": has_next,
-    #                         "has_prev": has_prev,
-    #                     },
-    #                 },
-    #                 status=True,
-    #             )
-
-    #     except DatabaseError as e:
-    #         # Log database error
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Error fetching previous orders: {}".format(str(e)),
-    #         )
-
-    #         # Return error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An error occurred while fetching previous orders.",
-    #         )
-
-    #     except Exception as e:
-    #         # Log other unhandled exceptions
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Unhandled error: {}".format(str(e)),
-    #         )
-    #         # Return a general internal server error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An internal server error occurred. Please try again later.",
-    #         )
 
     @staticmethod
     async def get_previous_orders(
@@ -3007,269 +3165,6 @@ class OrderService:
         finally:
             if db:
                 db.close()
-
-    # @staticmethod
-    # def export_orders(order_filters: Order_filters):
-
-    #     try:
-
-    #         # destructure the filters
-    #         order_status = order_filters.order_status
-    #         search_term = order_filters.search_term
-    #         start_date = order_filters.start_date
-    #         end_date = order_filters.end_date
-    #         payment_mode = order_filters.payment_mode
-    #         courier_filter = order_filters.courier_filter
-    #         sku_codes = order_filters.sku_codes
-    #         order_id = order_filters.order_id
-
-    #         db = get_db_session()
-
-    #         company_id = context_user_data.get().company_id
-    #         client_id = context_user_data.get().client_id
-
-    #         # query the db for fetching the orders
-
-    #         query = db.query(Order)
-    #         query = query.filter(
-    #             Order.client_id == client_id,
-    #             Order.is_deleted == False,
-    #         )
-
-    #         if search_term:
-    #             search_terms = [
-    #                 term.strip() for term in search_term.split(",")
-    #             ]  # Split and remove whitespace
-    #             query = query.filter(
-    #                 or_(
-    #                     *[
-    #                         or_(
-    #                             Order.order_id == term,
-    #                             Order.awb_number == term,
-    #                             Order.consignee_phone == term,
-    #                             Order.consignee_alternate_phone == term,
-    #                             Order.consignee_email == term,
-    #                         )
-    #                         for term in search_terms
-    #                     ]
-    #                 )
-    #             )
-    #         # date range filter
-
-    #         query = query.filter(
-    #             cast(Order.order_date, DateTime) >= start_date,
-    #             cast(Order.order_date, DateTime) <= end_date,
-    #         )
-    #         print(query.count())
-
-    #         if sku_codes:
-
-    #             sku_codes = [term.strip() for term in sku_codes.split(",")]
-
-    #             like_conditions = [
-    #                 cast(Order.products, String).like(f'%"sku_code": "{sku}"%')
-    #                 for sku in sku_codes
-    #             ]
-
-    #             # Filter orders based on the conditions
-    #             query = query.filter(
-    #                 or_(*like_conditions)  # Use 'or_' to combine the LIKE conditions
-    #             )
-
-    #         if payment_mode:
-    #             query = query.filter(Order.payment_mode == payment_mode)
-
-    #         if courier_filter:
-    #             query = query.filter(Order.courier_partner == courier_filter)
-
-    #         # status filter
-    #         if order_status != "all":
-    #             query = query.filter(Order.status == order_status)
-
-    #         if order_id:
-    #             order_ids = [
-    #                 term.strip() for term in order_id.split(",")
-    #             ]  # Split and trim spaces
-    #             query = query.filter(Order.order_id.in_(order_ids))
-
-    #         # fetch the orders in descending order of order date
-    #         query = query.order_by(desc(Order.order_date), desc(Order.created_at))
-
-    #         fetched_orders = query.options(joinedload(Order.pickup_location)).all()
-
-    #         orders_data = []
-    #         client_name_dict = {}
-
-    #         for order in fetched_orders:
-
-    #             body = {
-    #                 "Order ID": order.order_id,
-    #                 "Order Date": (
-    #                     order.order_date.strftime("%Y-%m-%d")
-    #                     if order.order_date
-    #                     else ""
-    #                 ),
-    #                 "Channel": order.channel,
-    #                 "Consignee Full Name": order.consignee_full_name,
-    #                 "Consignee Phone": order.consignee_phone,
-    #                 "Consignee Alternate Phone": order.consignee_alternate_phone,
-    #                 "Consignee Email": order.consignee_email,
-    #                 "Consignee Company": order.consignee_company,
-    #                 "Consignee GSTIN": order.consignee_gstin,
-    #                 "Consignee Address": order.consignee_address,
-    #                 "Consignee Landmark": order.consignee_landmark,
-    #                 "Consignee Pincode": order.consignee_pincode,
-    #                 "Consignee City": order.consignee_city,
-    #                 "Consignee State": order.consignee_state,
-    #                 "Consignee Country": order.consignee_country,
-    #                 "Billing is Same as Consignee": order.billing_is_same_as_consignee,
-    #                 "Billing Full Name": order.billing_full_name,
-    #                 "Billing Phone": order.billing_phone,
-    #                 "Billing Email": order.billing_email,
-    #                 "Billing Address": order.billing_address,
-    #                 "Billing Landmark": order.billing_landmark,
-    #                 "Billing Pincode": order.billing_pincode,
-    #                 "Billing City": order.billing_city,
-    #                 "Billing State": order.billing_state,
-    #                 "Billing Country": order.billing_country,
-    #                 "Pickup Location Details": {
-    #                     "location_type": (
-    #                         order.pickup_location.location_type
-    #                         if order.pickup_location.location_type != ""
-    #                         else ""
-    #                     ),
-    #                     "alternate_phone": (
-    #                         order.pickup_location.alternate_phone
-    #                         if order.pickup_location.alternate_phone != ""
-    #                         else ""
-    #                     ),
-    #                     "address": (
-    #                         order.pickup_location.address
-    #                         if order.pickup_location.address != ""
-    #                         else ""
-    #                     ),
-    #                     "location_code": (
-    #                         order.pickup_location.location_code
-    #                         if order.pickup_location.location_code != ""
-    #                         else ""
-    #                     ),
-    #                     "contact_person_name": (
-    #                         order.pickup_location.contact_person_name
-    #                         if order.pickup_location.contact_person_name != ""
-    #                         else ""
-    #                     ),
-    #                     "pincode": (
-    #                         order.pickup_location.pincode
-    #                         if order.pickup_location.pincode != ""
-    #                         else ""
-    #                     ),
-    #                 },
-    #                 "Payment Mode": order.payment_mode,
-    #                 "Total Amount": order.total_amount,
-    #                 "Order Value": order.order_value,
-    #                 "Shipping Charges": order.shipping_charges,
-    #                 "COD Charges": order.cod_charges,
-    #                 "Discount": order.discount,
-    #                 "Gift Wrap Charges": order.gift_wrap_charges,
-    #                 "Other Charges": order.other_charges,
-    #                 "Tax Amount": order.tax_amount,
-    #                 "Eway Bill Number": order.eway_bill_number,
-    #                 "Length": order.length,
-    #                 "Breadth": order.breadth,
-    #                 "Height": order.height,
-    #                 "Weight": order.weight,
-    #                 "Applicable Weight": order.applicable_weight,
-    #                 "Volumetric Weight": order.volumetric_weight,
-    #                 "Courier Partner": order.courier_partner,
-    #                 "AWB Number": order.awb_number,
-    #                 "Status": order.sub_status,
-    #                 "delivered_date": (
-    #                     order.delivered_date.strftime("%Y-%m-%d")
-    #                     if order.delivered_date
-    #                     else ""
-    #                 ),
-    #                 "booking_date": (
-    #                     order.booking_date.strftime("%Y-%m-%d %H:%M:%S")
-    #                     if order.booking_date
-    #                     else ""
-    #                 ),
-    #                 "edd": order.edd.strftime("%Y-%m-%d") if order.edd else "",
-    #                 "pickup_completion_date": (
-    #                     order.pickup_completion_date.strftime("%Y-%m-%d %H:%M:%S")
-    #                     if order.pickup_completion_date
-    #                     else ""
-    #                 ),
-    #                 "First Out for Pickup Date": (
-    #                     order.first_ofp_date.strftime("%Y-%m-%d %H:%M:%S")
-    #                     if order.first_ofp_date
-    #                     else ""
-    #                 ),
-    #                 "Pickup failure reason": order.pickup_failed_reason or "",
-    #                 "First Out for Delivery Date": (
-    #                     order.first_ofd_date.strftime("%Y-%m-%d %H:%M:%S")
-    #                     if order.first_ofd_date
-    #                     else ""
-    #                 ),
-    #                 "RTO Initiated Date": (
-    #                     order.rto_initiated_date.strftime("%Y-%m-%d %H:%M:%S")
-    #                     if order.rto_initiated_date
-    #                     else ""
-    #                 ),
-    #                 "RTO Delivered Date": (
-    #                     order.rto_delivered_date.strftime("%Y-%m-%d %H:%M:%S")
-    #                     if order.rto_delivered_date
-    #                     else ""
-    #                 ),
-    #                 "RTO Reason": order.rto_reason or "",
-    #                 "Forward Freight": order.forward_freight or 0,
-    #                 "Forward COD Charge": order.forward_cod_charge or 0,
-    #                 "Forward Tax": order.forward_tax or 0,
-    #                 "RTO Freight": order.rto_freight or 0,
-    #                 "RTO Tax": order.rto_tax or 0,
-    #             }
-
-    #             orders_data.append(body)
-
-    #         # Create a DataFrame
-    #         df = pd.DataFrame(orders_data)
-
-    #         # Create an in-memory bytes buffer
-    #         output = BytesIO()
-    #         with pd.ExcelWriter(output, engine="xlsxwriter") as writer:
-    #             df.to_excel(writer, index=False, sheet_name="Orders")
-
-    #         # Return the file as a downloadable response
-    #         output.seek(0)
-    #         headers = {
-    #             "Content-Disposition": 'attachment; filename="orders.xlsx"',
-    #             "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    #         }
-    #         return base64.b64encode(output.getvalue()).decode("utf-8")
-
-    #     except DatabaseError as e:
-    #         # Log database error
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Error fecthing Order: {}".format(str(e)),
-    #         )
-
-    #         # Return error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An error occurred while fetchin the Orders.",
-    #         )
-
-    #     except Exception as e:
-    #         # Log other unhandled exceptions
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Unhandled error: {}".format(str(e)),
-    #         )
-    #         # Return a general internal server error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An internal server error occurred. Please try again later.",
-    #         )
 
     @staticmethod
     async def export_orders(order_filters: Order_filters):
@@ -3957,117 +3852,6 @@ class OrderService:
         finally:
             if db:
                 db.close()
-
-    # @staticmethod
-    # def get_order_status_counts(order_status_filter):
-
-    #     try:
-    #         search_term = order_status_filter.search_term
-    #         start_date = order_status_filter.start_date
-    #         end_date = order_status_filter.end_date
-    #         date_type = order_status_filter.date_type
-
-    #         with get_db_session() as db:
-
-    #             company_id = context_user_data.get().company_id
-    #             client_id = context_user_data.get().client_id
-
-    #             # query the db for fetching the orders
-
-    #             query = db.query(Order)
-
-    #             if client_id != 85:
-
-    #                 # applying company and client filter
-    #                 query = query.filter(
-    #                     Order.company_id == company_id,
-    #                     Order.client_id == client_id,
-    #                     Order.is_deleted == False,
-    #                 )
-
-    #             else:
-    #                 # applying company and client filter
-    #                 query = query.filter(Order.is_deleted == False)
-
-    #             # if search term is present, give it the highest priority and no other filter will be applied
-
-    #             if search_term:
-    #                 search_terms = [
-    #                     term.strip() for term in search_term.split(",")
-    #                 ]  # Split and remove whitespace
-    #                 query = query.filter(
-    #                     or_(
-    #                         *[
-    #                             or_(
-    #                                 Order.order_id == term,
-    #                                 Order.awb_number == term,
-    #                                 Order.consignee_phone == term,
-    #                                 Order.consignee_alternate_phone == term,
-    #                                 Order.consignee_email == term,
-    #                             )
-    #                             for term in search_terms
-    #                         ]
-    #                     )
-    #                 )
-
-    #             # date range filter
-
-    #             if date_type == "order date":
-    #                 query = query.filter(
-    #                     cast(Order.order_date, DateTime) >= start_date,
-    #                     cast(Order.order_date, DateTime) <= end_date,
-    #                 )
-
-    #             elif date_type == "booking date":
-    #                 query = query.filter(
-    #                     cast(Order.booking_date, DateTime) >= start_date,
-    #                     cast(Order.booking_date, DateTime) <= end_date,
-    #                 )
-
-    #             # Get counts for each status before applying the status filter
-    #             status_counts = (
-    #                 query.with_entities(Order.status, func.count(Order.id))
-    #                 .group_by(Order.status)  # Group by status
-    #                 .all()
-    #             )
-
-    #             # create a dictionary for the status counts
-    #             status_counts = {status: count for status, count in status_counts}
-    #             status_counts["all"] = query.count()
-
-    #             return GenericResponseModel(
-    #                 status_code=http.HTTPStatus.OK,
-    #                 message="Orders fetched Successfully",
-    #                 data={
-    #                     "status_counts": status_counts,
-    #                 },
-    #                 status=True,
-    #             )
-
-    #     except DatabaseError as e:
-    #         # Log database error
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Error fecthing Order Statuses: {}".format(str(e)),
-    #         )
-
-    #         # Return error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An error occurred while fetchin the Order Statuses.",
-    #         )
-
-    #     except Exception as e:
-    #         # Log other unhandled exceptions
-    #         logger.error(
-    #             extra=context_user_data.get(),
-    #             msg="Unhandled error: {}".format(str(e)),
-    #         )
-    #         # Return a general internal server error response
-    #         return GenericResponseModel(
-    #             status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-    #             message="An internal server error occurred. Please try again later.",
-    #         )
 
     @staticmethod
     async def get_order_by_Id(order_id: str):

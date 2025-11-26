@@ -673,3 +673,25 @@ async def terminate_idle_database_connections():
                 status=False,
             )
         )
+
+
+# get all orders from easycom
+@order_router.post(
+    "/easycom/sync-orders",
+    status_code=http.HTTPStatus.CREATED,
+    response_model=GenericResponseModel,
+)
+async def get_all_from_easycom_orders():
+    try:
+        # await the async service function
+        response: GenericResponseModel = await OrderService.sync_orders_from_easycom()
+        return build_api_response(response)
+
+    except Exception as e:
+        return build_api_response(
+            GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                data=str(e),
+                message="An error occurred while fetching the orders.",
+            )
+        )
