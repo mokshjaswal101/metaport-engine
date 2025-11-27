@@ -2395,9 +2395,29 @@ class OrderService:
                     common_filters.append(
                         cast(Order.booking_date, DateTime) >= start_date
                     )
-                if end_date:
+                if start_date:
                     common_filters.append(
                         cast(Order.booking_date, DateTime) <= end_date
+                    )
+
+            elif date_type == "rto initiated date":
+                if start_date:
+                    common_filters.append(
+                        cast(Order.rto_initiated_date, DateTime) >= start_date
+                    )
+                if start_date:
+                    common_filters.append(
+                        cast(Order.rto_initiated_date, DateTime) <= end_date
+                    )
+
+            elif date_type == "rto delivered date":
+                if start_date:
+                    common_filters.append(
+                        cast(Order.rto_delivered_date, DateTime) >= start_date
+                    )
+                if start_date:
+                    common_filters.append(
+                        cast(Order.rto_delivered_date, DateTime) <= end_date
                     )
 
             # --------------------------------
@@ -2504,6 +2524,20 @@ class OrderService:
             status_counts = {status: count for status, count in status_result.all()}
             status_counts["all"] = sum(status_counts.values())
 
+            sub_status_filters = [*base_filters, *common_filters, *remaining_filters]
+            # Add order_status filter for sub_status query
+            if order_status != "all":
+                sub_status_filters.append(Order.status == order_status)
+
+            sub_status_query = (
+                select(Order.sub_status)
+                .where(*sub_status_filters)
+                .where(Order.sub_status.isnot(None))
+                .where(Order.sub_status != "")
+                .distinct()
+            )
+            sub_status_result = await db.execute(sub_status_query)
+            sub_statuses = [status for status in sub_status_result.scalars().all()]
             # --------------------------------
             # MAIN QUERY
             # --------------------------------
@@ -2577,6 +2611,7 @@ class OrderService:
                     "orders": orders_response,
                     "total_count": total_count,
                     "status_counts": status_counts,
+                    "sub_statuses": sub_statuses,
                 },
             )
 

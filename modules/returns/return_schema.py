@@ -273,3 +273,28 @@ class Dev_Return_Order_Create_Request_Model(
     products: List[product]
     return_reason: Optional[str] = None
     courier: int
+
+
+class BulkReturnOrderRequest(BaseModel):
+    """Schema for bulk return order creation"""
+
+    order_ids: List[str]  # List of forward order IDs to create returns for
+
+
+class BulkReturnOrderResponse(BaseModel):
+    """Response for individual return order creation"""
+
+    order_id: str
+    forward_order_id: str
+    status: str  # "success" or "failed"
+    message: str
+    return_order_id: Optional[str] = None
+
+
+class BulkReturnOrderResult(BaseModel):
+    """Overall result for bulk return order creation"""
+
+    total: int
+    successful: int
+    failed: int
+    results: List[BulkReturnOrderResponse]

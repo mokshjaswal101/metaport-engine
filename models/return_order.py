@@ -37,8 +37,8 @@ class Return_Order(DBBase, DBBaseClass):
     client = relationship("Client", lazy="noload")
     pickup_location = relationship("Pickup_Location", lazy="noload")
 
-    booking_date = Column(TIMESTAMP(timezone=True), nullable=False)
-    delivered_date = Column(TIMESTAMP(timezone=True), nullable=False)
+    booking_date = Column(TIMESTAMP(timezone=True), nullable=True)
+    delivered_date = Column(TIMESTAMP(timezone=True), nullable=True)
 
     # shipping details
     consignee_full_name = Column(String(100), nullable=False)
@@ -136,7 +136,7 @@ class Return_Order(DBBase, DBBaseClass):
     source = Column(String(255), nullable=True)
     marketplace_order_id = Column(String(255), nullable=True)
 
-    edd = Column(TIMESTAMP(timezone=True), nullable=False)
+    edd = Column(TIMESTAMP(timezone=True), nullable=True)
 
     cod_remittance_cycle_id = Column(
         Integer, ForeignKey("cod_remittance.id"), nullable=True

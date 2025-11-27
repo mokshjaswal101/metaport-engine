@@ -7,6 +7,7 @@ from datetime import datetime
 # schema
 from schema.base import GenericResponseModel
 from modules.returns.return_schema import (
+    BulkReturnOrderRequest,
     Order_create_request_model,
     Order_filters,
     Order_Status_Filters,
@@ -38,9 +39,11 @@ async def create_order(
     order_data: Order_create_request_model,
 ):
     try:
-        response: GenericResponseModel = ReturnService.create_order(
+        # Await the async service
+        response: GenericResponseModel = await ReturnService.create_order(
             order_data=order_data
         )
+
         return build_api_response(response)
 
     except Exception as e:
@@ -49,6 +52,35 @@ async def create_order(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
                 message="An error occurred while creating the order.",
+                status=False,
+            )
+        )
+
+
+# Bulk create return orders
+@return_router.post(
+    "/bulk-create-returns",
+    status_code=http.HTTPStatus.CREATED,
+    response_model=GenericResponseModel,
+)
+async def bulk_create_return_orders(data: BulkReturnOrderRequest):
+    """
+    Create return orders for multiple forward orders in bulk.
+    Only creates returns for delivered orders.
+    """
+    try:
+        response: GenericResponseModel = await ReturnService.bulk_create_return_orders(
+            order_ids=data.order_ids
+        )
+        return build_api_response(response)
+
+    except Exception as e:
+        return build_api_response(
+            GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                data=str(e),
+                message="An error occurred while creating bulk return orders.",
+                status=False,
             )
         )
 
@@ -176,7 +208,7 @@ async def create_order(data: bulkCancelOrderModel):
 )
 async def get_all_orders(order_filters: Order_filters):
     try:
-        response: GenericResponseModel = ReturnService.get_all_orders(
+        response: GenericResponseModel = await ReturnService.get_all_orders(
             order_filters=order_filters
         )
         return build_api_response(response)
