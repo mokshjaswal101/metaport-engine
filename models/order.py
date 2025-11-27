@@ -8,6 +8,7 @@ from sqlalchemy import (
     Boolean,
     TIMESTAMP,
     UniqueConstraint,
+    Index,
 )
 from sqlalchemy.orm import relationship
 from sqlalchemy.dialects.postgresql import JSON, JSONB
@@ -197,6 +198,12 @@ class Order(DBBase, DBBaseClass):
 
     __table_args__ = (
         UniqueConstraint("order_id", "client_id", name="unique_order_id_for_client"),
+        # Index for pickup location queries (used in pickup location orders count)
+        Index(
+            "ix_order_pickup_location_client",
+            "pickup_location_code",
+            "client_id",
+        ),
     )
 
     def to_model(self):

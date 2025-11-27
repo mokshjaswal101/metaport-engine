@@ -1,13 +1,14 @@
 import http
-from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends
+from typing import Optional
+from fastapi import APIRouter, Query
+from fastapi.responses import StreamingResponse
+import io
 
 from context_manager.context import build_request_context
 
 # schema
 from schema.base import GenericResponseModel
-from .pickup_location_schema import PickupLocationInsertModel
+from .pickup_location_schema import PickupLocationInsertModel, PickupLocationUpdateModel
 
 # utils
 from utils.response_handler import build_api_response
@@ -27,6 +28,7 @@ pickup_router = APIRouter(tags=["pickup location"])
 async def create_new_location(
     pickup_location_data: PickupLocationInsertModel,
 ):
+    """Create a new pickup location. First location is automatically set as default."""
     response: GenericResponseModel = PickupLocationService.create_pickup_location(
         pickup_location_data=pickup_location_data
     )
@@ -38,9 +40,10 @@ async def create_new_location(
     status_code=http.HTTPStatus.CREATED,
     response_model=GenericResponseModel,
 )
-async def create_new_location(
+async def create_new_location_dev(
     pickup_location_data: PickupLocationInsertModel,
 ):
+    """Create a new pickup location (dev endpoint)"""
     response: GenericResponseModel = PickupLocationService.create_pickup_location(
         pickup_location_data=pickup_location_data
     )
@@ -49,10 +52,11 @@ async def create_new_location(
 
 @pickup_router.post(
     "/pickuplocation/set-default/{location_id}",
-    status_code=http.HTTPStatus.CREATED,
+    status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
 async def set_default_location(location_id: str):
+    """Set a pickup location as the default"""
     response: GenericResponseModel = PickupLocationService.set_default_location(
         pickup_location_id=location_id
     )
@@ -60,33 +64,90 @@ async def set_default_location(location_id: str):
 
 
 @pickup_router.put(
-    "/pickuplocation/status/{location_id}",
-    status_code=http.HTTPStatus.CREATED,
+    "/pickuplocation/toggle-status/{location_id}",
+    status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
-async def set_default_location(location_id: str):
-    response: GenericResponseModel = PickupLocationService.set_default_location(
-        pickup_location_id=location_id
+async def toggle_location_status(location_id: str):
+    """Toggle the active status of a pickup location (enable/disable)"""
+    response: GenericResponseModel = (
+        PickupLocationService.toggle_location_active_status(
+            pickup_location_id=location_id
+        )
+    )
+    return build_api_response(response)
+
+
+@pickup_router.put(
+    "/pickuplocation/{location_id}",
+    status_code=http.HTTPStatus.OK,
+    response_model=GenericResponseModel,
+)
+async def update_pickup_location(
+    location_id: str,
+    update_data: PickupLocationUpdateModel,
+):
+    """Update a pickup location"""
+    response: GenericResponseModel = PickupLocationService.update_pickup_location(
+        pickup_location_id=location_id,
+        update_data=update_data,
     )
     return build_api_response(response)
 
 
 @pickup_router.get(
     "/pickuplocation/",
-    status_code=http.HTTPStatus.CREATED,
+    status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
-async def get_locations():
-    response: GenericResponseModel = PickupLocationService.get_pickup_locations()
+async def get_locations(
+    page: int = Query(default=1, ge=1, description="Page number"),
+    page_size: int = Query(
+        default=10, ge=1, le=100, description="Number of items per page"
+    ),
+    search: Optional[str] = Query(
+        default=None,
+        description="Search by name, code, contact, address, city, pincode",
+    ),
+):
+    """Get all pickup locations with orders count (paginated)"""
+    response: GenericResponseModel = PickupLocationService.get_pickup_locations(
+        page=page,
+        page_size=page_size,
+        search=search,
+    )
     return build_api_response(response)
+
+
+@pickup_router.get(
+    "/pickuplocation/export",
+    status_code=http.HTTPStatus.OK,
+)
+async def export_locations():
+    """Export all pickup locations to CSV file"""
+    response: GenericResponseModel = PickupLocationService.export_locations_csv()
+
+    if not response.status:
+        return build_api_response(response)
+
+    # Return CSV as downloadable file
+    csv_content = response.data["csv_content"]
+    filename = response.data["filename"]
+
+    return StreamingResponse(
+        io.StringIO(csv_content),
+        media_type="text/csv",
+        headers={"Content-Disposition": f"attachment; filename={filename}"},
+    )
 
 
 @pickup_router.delete(
     "/pickuplocation/{location_id}",
-    status_code=http.HTTPStatus.CREATED,
+    status_code=http.HTTPStatus.OK,
     response_model=GenericResponseModel,
 )
 async def delete_pickup_location(location_id: str):
+    """Delete a pickup location (soft delete). Fails if orders exist."""
     response: GenericResponseModel = PickupLocationService.delete_location(
         pickup_location_id=location_id
     )

@@ -22,9 +22,9 @@ class UserDataModel(BaseModel):
 
 # JWT configuration
 class JWTToken:
-    algorithm = os.getenv("JWT_ALGORITHM", "HS256")
-    secret = os.getenv("JWT_SECRET", "secret_key")
-    access_token_expire_minutes = os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES", "300")
+    algorithm = os.getenv("JWT_ALGORITHM")
+    secret = os.getenv("JWT_SECRET")
+    access_token_expire_minutes = os.getenv("JWT_ACCESS_TOKEN_EXPIRE_MINUTES")
 
 
 class JWTHandler:
@@ -72,6 +72,8 @@ class JWTHandler:
             )
 
             context_user_data.set(UserDataModel(**payload))
+
+            return payload
 
         except jwt.ExpiredSignatureError:
             raise HTTPException(

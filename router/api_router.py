@@ -70,6 +70,7 @@ async def get_current_user(
 
     # Get user_id from token
     user_id = payload.get("id")
+
     if not user_id:
         AuditLogger.log_unauthorized_access(reason="Invalid token: user_id not found")
         raise HTTPException(
@@ -122,7 +123,7 @@ async def get_current_user(
 # create a comming master router for all the routes in the service
 CommonRouter = APIRouter(
     prefix="/api/v1",
-    dependencies=[Depends(get_current_user), Depends(build_request_context)],
+    dependencies=[Depends(build_request_context), Depends(get_current_user)],
 )
 
 

@@ -62,6 +62,9 @@ from .otp_verification import OTP_Verification
 # Audit Logs
 from .audit_log import AuditLog
 
+# Activity Logs (for general entity tracking)
+from .activity_log import ActivityLog
+
 from .billing_invoice import Billing_Invoice
 
 from .market_place import Market_Place
