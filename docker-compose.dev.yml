@@ -1,0 +1,48 @@
+# Docker Compose for Local Development
+# This file sets up Redis for Celery background task processing
+#
+# Usage:
+#   Start:   docker-compose -f docker-compose.dev.yml up -d
+#   Stop:    docker-compose -f docker-compose.dev.yml down
+#   Logs:    docker-compose -f docker-compose.dev.yml logs -f redis
+#   Status:  docker-compose -f docker-compose.dev.yml ps
+#
+# Troubleshooting (Windows):
+#   1. Make sure Docker Desktop is running
+#   2. If image pull fails, try: docker pull redis:7
+#   3. Alternative: Install Memurai (https://www.memurai.com/get-memurai)
+
+version: "3.8"
+
+services:
+  redis:
+    image: redis:7
+    container_name: metaport_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Optional: Redis Commander for debugging (access at http://localhost:8081)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: metaport_redis_commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    profiles:
+      - debug # Only starts with: docker-compose -f docker-compose.dev.yml --profile debug up -d
+
+volumes:
+  redis_data:
+    driver: local

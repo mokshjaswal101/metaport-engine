@@ -1,8 +1,6 @@
 import http
 from typing import Optional
 from fastapi import APIRouter, Query
-from fastapi.responses import StreamingResponse
-import io
 
 from context_manager.context import build_request_context
 
@@ -117,28 +115,6 @@ async def get_locations(
         search=search,
     )
     return build_api_response(response)
-
-
-@pickup_router.get(
-    "/pickuplocation/export",
-    status_code=http.HTTPStatus.OK,
-)
-async def export_locations():
-    """Export all pickup locations to CSV file"""
-    response: GenericResponseModel = PickupLocationService.export_locations_csv()
-
-    if not response.status:
-        return build_api_response(response)
-
-    # Return CSV as downloadable file
-    csv_content = response.data["csv_content"]
-    filename = response.data["filename"]
-
-    return StreamingResponse(
-        io.StringIO(csv_content),
-        media_type="text/csv",
-        headers={"Content-Disposition": f"attachment; filename={filename}"},
-    )
 
 
 @pickup_router.delete(

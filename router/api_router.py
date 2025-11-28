@@ -45,6 +45,9 @@ from modules.channels.integrations.shopify import (
     shopify_management_integration_router,
 )
 
+# Reports (Background Report Generation)
+from modules.reports.reports_controller import reports_router
+
 
 # settings
 from modules.documents.shipping_label.shipping_label_controller import label_router
@@ -158,3 +161,6 @@ CommonRouter.include_router(channel_router)
 CommonRouter.include_router(shopify_oauth_integration_router)
 # Shopify management endpoints (pause, resume, sync, webhooks cleanup, etc.)
 CommonRouter.include_router(shopify_management_integration_router)
+
+# Reports (Background Report Generation)
+CommonRouter.include_router(reports_router)
