@@ -11,6 +11,7 @@ from modules.qc.qc_schema import QCItemSchema
 # from models import Qc
 # models
 from models import Qc
+from collections import defaultdict
 
 from context_manager.context import get_db_session, context_user_data
 
@@ -23,24 +24,30 @@ class QcService:
     @staticmethod
     async def get_list() -> GenericResponseModel:
         try:
-            async with get_db_session() as db:  # AsyncSession
+            async with get_db_session() as db:
                 user_data = context_user_data.get()
                 client_id = user_data.client_id
-                # Execute query
+
+                # Fetch all QC items for this client
                 result = await db.execute(select(Qc).where(Qc.client_id == client_id))
-                # Get ORM objects as list
                 qc_items = result.scalars().all()
-                # Encode to JSON-serializable format
+
+                # Group items by category and reason_name
+                grouped = defaultdict(list)
+                for item in qc_items:
+                    key = (item.category, item.reason_name)
+                    grouped[key].append(
+                        {
+                            "parameters_name": item.parameters_value,
+                            "parameters_value": item.parameters_value,
+                            "is_mandatory": item.is_mandatory,
+                        }
+                    )
+
+                # Build structured data
                 data = [
-                    {
-                        "category": item.category,
-                        "reason_name": item.reason_name,
-                        "brand_name": item.brand_name,
-                        "item_name": item.item_name,
-                        "item_description": item.item_description,
-                        "is_mandatory": item.is_mandatory,
-                    }
-                    for item in qc_items
+                    {"category": category, "reason_name": reason, "items": items}
+                    for (category, reason), items in grouped.items()
                 ]
 
                 return GenericResponseModel(
@@ -61,42 +68,48 @@ class QcService:
     @staticmethod
     async def add_qc(qc_item: QCItemSchema) -> GenericResponseModel:
         try:
-            async with get_db_session() as db:  # AsyncSession required
+            async with get_db_session() as db:
                 user_data = context_user_data.get()
-                existing_qc = await db.execute(
+
+                # STEP 1 — Check if reason already exists
+                existing_reasons = await db.execute(
                     select(Qc).where(
+                        Qc.client_id == user_data.client_id,
                         Qc.reason_name == qc_item.reasonName,
                     )
                 )
-                existing_qc = existing_qc.scalars().first()
-                if existing_qc:
+                existing_reasons = existing_reasons.scalars().all()
+
+                if existing_reasons:
                     return GenericResponseModel(
                         status=False,
-                        status_code=http.HTTPStatus.CONFLICT,  # 409
-                        message="Reason is already exist",
+                        status_code=http.HTTPStatus.CONFLICT,
+                        message=f"Reason already exists: {qc_item.reasonName}",
                     )
-                #  STEP 2 — Create new QC item
-                new_qc = Qc(
-                    client_id=user_data.client_id,
-                    category=qc_item.category,
-                    reason_name=qc_item.reasonName,
-                    brand_name=qc_item.brandName,
-                    item_name=qc_item.itemName,
-                    item_description=qc_item.itemDescription,
-                    is_mandatory=qc_item.isMandatory,
-                )
-                db.add(new_qc)
+
+                # STEP 2 — Add all items for the reason
+                for item in qc_item.items:
+                    new_qc = Qc(
+                        client_id=user_data.client_id,
+                        category=qc_item.category,
+                        reason_name=qc_item.reasonName,
+                        parameters_name=item.parametersName,
+                        parameters_value=item.parametersValue,
+                        is_mandatory=item.isMandatory,
+                    )
+                    db.add(new_qc)
+
                 await db.commit()
-                await db.refresh(new_qc)
+
                 return GenericResponseModel(
                     status=True,
                     status_code=http.HTTPStatus.OK,
-                    message="QC added successfully",
+                    message="QC items added successfully",
                 )
         except Exception as e:
             return GenericResponseModel(
                 status=False,
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="Failed to add QC",
+                message=f"Failed to add QC: {str(e)}",
                 data={},
             )

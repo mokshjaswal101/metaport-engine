@@ -6,10 +6,13 @@ from enum import Enum
 from pydantic import BaseModel
 
 
+class QCItem(BaseModel):
+    parametersName: str
+    parametersValue: str
+    isMandatory: bool
+
+
 class QCItemSchema(BaseModel):
     category: str
     reasonName: str
-    brandName: str
-    itemName: str
-    itemDescription: str
-    isMandatory: bool
+    items: List[QCItem]
