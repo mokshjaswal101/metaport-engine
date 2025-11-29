@@ -82,7 +82,6 @@ class PickupLocationsGenerator(BaseReportGenerator):
                 )
                 .filter(
                     Pickup_Location.client_id == self.client_id,
-                    Pickup_Location.company_id == self.company_id,
                     Pickup_Location.is_deleted == False,
                 )
             )

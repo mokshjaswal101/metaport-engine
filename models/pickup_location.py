@@ -56,12 +56,6 @@ class Pickup_Location(DBBase, DBBaseClass):
         JSON,
         nullable=True,
     )  # optional
-    company_id = Column(
-        Integer,
-        ForeignKey("company.id"),
-        nullable=False,
-        index=True,  # Index for company filtering
-    )
     client_id = Column(
         Integer, ForeignKey("client.id"), nullable=False, index=True
     )  # Index for client filtering
@@ -70,9 +64,8 @@ class Pickup_Location(DBBase, DBBaseClass):
     __table_args__ = (
         # Index for fetching all locations for a client (most common query)
         Index(
-            "ix_pickup_location_client_company_deleted",
+            "ix_pickup_location_client_deleted",
             "client_id",
-            "company_id",
             "is_deleted",
         ),
         # Index for finding default location quickly

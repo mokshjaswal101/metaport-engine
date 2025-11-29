@@ -32,7 +32,6 @@ class PickupLocationService:
         action: str,
         entity_id: str,
         client_id: int,
-        company_id: int,
         user_id: int = None,
         user_email: str = None,
         old_value: dict = None,
@@ -46,7 +45,6 @@ class PickupLocationService:
                 entity_id=entity_id,
                 action=action,
                 client_id=client_id,
-                company_id=company_id,
                 user_id=user_id,
                 user_email=user_email,
                 old_value=old_value,
@@ -82,7 +80,6 @@ class PickupLocationService:
         try:
             user_data = context_user_data.get()
             client_id = user_data.client_id
-            company_id = user_data.company_id
             user_id = getattr(user_data, "user_id", None)
             user_email = getattr(user_data, "email", None)
 
@@ -97,7 +94,6 @@ class PickupLocationService:
             location_data = {
                 **pickup_location_data.model_dump(exclude={"is_default"}),
                 "client_id": client_id,
-                "company_id": company_id,
                 "location_code": location_code,
                 "courier_location_codes": {},
                 "is_default": False,
@@ -161,7 +157,6 @@ class PickupLocationService:
                         action="REMOVE_DEFAULT",
                         entity_id=current_default.location_code,
                         client_id=client_id,
-                        company_id=company_id,
                         user_id=user_id,
                         user_email=user_email,
                         old_value=old_default_value,
@@ -182,7 +177,6 @@ class PickupLocationService:
                 action="CREATE",
                 entity_id=location_code,
                 client_id=client_id,
-                company_id=company_id,
                 user_id=user_id,
                 user_email=user_email,
                 old_value=None,
@@ -228,7 +222,6 @@ class PickupLocationService:
         try:
             user_data = context_user_data.get()
             client_id = user_data.client_id
-            company_id = user_data.company_id
             user_id = getattr(user_data, "user_id", None)
             user_email = getattr(user_data, "email", None)
 
@@ -292,7 +285,6 @@ class PickupLocationService:
                     action="REMOVE_DEFAULT",
                     entity_id=current_default.location_code,
                     client_id=client_id,
-                    company_id=company_id,
                     user_id=user_id,
                     user_email=user_email,
                     old_value=old_default_value,
@@ -311,7 +303,6 @@ class PickupLocationService:
                 action="SET_DEFAULT",
                 entity_id=pickup_location_id,
                 client_id=client_id,
-                company_id=company_id,
                 user_id=user_id,
                 user_email=user_email,
                 old_value=old_location_value,
@@ -353,7 +344,6 @@ class PickupLocationService:
         try:
             user_data = context_user_data.get()
             client_id = user_data.client_id
-            company_id = user_data.company_id
             user_id = getattr(user_data, "user_id", None)
             user_email = getattr(user_data, "email", None)
 
@@ -400,7 +390,6 @@ class PickupLocationService:
                 action="TOGGLE_STATUS",
                 entity_id=pickup_location_id,
                 client_id=client_id,
-                company_id=company_id,
                 user_id=user_id,
                 user_email=user_email,
                 old_value=old_value,
@@ -444,7 +433,6 @@ class PickupLocationService:
         try:
             user_data = context_user_data.get()
             client_id = user_data.client_id
-            company_id = user_data.company_id
             user_id = getattr(user_data, "user_id", None)
             user_email = getattr(user_data, "email", None)
 
@@ -513,7 +501,6 @@ class PickupLocationService:
                 action="UPDATE",
                 entity_id=pickup_location_id,
                 client_id=client_id,
-                company_id=company_id,
                 user_id=user_id,
                 user_email=user_email,
                 old_value=old_value,
@@ -556,7 +543,6 @@ class PickupLocationService:
         try:
             user_data = context_user_data.get()
             client_id = user_data.client_id
-            company_id = user_data.company_id
             user_id = getattr(user_data, "user_id", None)
             user_email = getattr(user_data, "email", None)
 
@@ -617,7 +603,6 @@ class PickupLocationService:
                 action="DELETE",
                 entity_id=pickup_location_id,
                 client_id=client_id,
-                company_id=company_id,
                 user_id=user_id,
                 user_email=user_email,
                 old_value=old_value,
@@ -661,7 +646,6 @@ class PickupLocationService:
         try:
             user_data = context_user_data.get()
             client_id = user_data.client_id
-            company_id = user_data.company_id
 
             db = get_db_session()
 
@@ -691,7 +675,6 @@ class PickupLocationService:
                 )
                 .filter(
                     Pickup_Location.client_id == client_id,
-                    Pickup_Location.company_id == company_id,
                     Pickup_Location.is_deleted == False,
                 )
             )

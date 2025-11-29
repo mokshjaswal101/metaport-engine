@@ -131,7 +131,6 @@ class PickupLocationModel(PickupLocationInsertModel, DBBaseModel):
     """Full pickup location model with all fields"""
 
     client_id: int
-    company_id: int
     location_code: str
     courier_location_codes: Optional[Dict[str, Union[str, int]]] = {}
     active: bool

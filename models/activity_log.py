@@ -22,9 +22,8 @@ class ActivityLog(DBBase, DBBaseClass):
     user_id = Column(Integer, nullable=True)
     user_email = Column(String(255), nullable=True)
 
-    # Client and Company context
+    # Client context
     client_id = Column(Integer, nullable=False)
-    company_id = Column(Integer, nullable=False)
 
     # State changes
     old_value = Column(JSON, nullable=True)  # Previous state (null for CREATE)
@@ -63,7 +62,6 @@ class ActivityLog(DBBase, DBBaseClass):
         entity_id: str,
         action: str,
         client_id: int,
-        company_id: int,
         user_id: int = None,
         user_email: str = None,
         old_value: dict = None,
@@ -82,7 +80,6 @@ class ActivityLog(DBBase, DBBaseClass):
             "entity_id": str(entity_id),
             "action": action,
             "client_id": client_id,
-            "company_id": company_id,
             "user_id": user_id,
             "user_email": user_email,
             "old_value": old_value,
