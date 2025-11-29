@@ -261,9 +261,18 @@ class ServiceabilityService:
 
             with get_db_session() as db:
 
+                # Optimized query: Select only needed columns and filter deleted records
+                # The unique index on pincode ensures fast lookup
                 pincode_data = (
-                    db.query(Pincode_Mapping)
-                    .filter(Pincode_Mapping.pincode == pincode)
+                    db.query(
+                        Pincode_Mapping.pincode,
+                        Pincode_Mapping.city,
+                        Pincode_Mapping.state,
+                    )
+                    .filter(
+                        Pincode_Mapping.pincode == pincode,
+                        Pincode_Mapping.is_deleted == False,
+                    )
                     .first()
                 )
 
@@ -275,8 +284,9 @@ class ServiceabilityService:
                     )
 
                 # create the response data for the pincode details
+                # Note: city and state are stored in lowercase for consistency
                 response_data = {
-                    "pincode": pincode,
+                    "pincode": pincode_data.pincode,
                     "city": pincode_data.city,
                     "state": pincode_data.state,
                     "country": "India",
@@ -286,7 +296,7 @@ class ServiceabilityService:
                     status_code=http.HTTPStatus.OK,
                     status=True,
                     data=response_data,
-                    message="Pincode data fethced successfully",
+                    message="Pincode data fetched successfully",
                 )
 
         except DatabaseError as e:
@@ -306,7 +316,7 @@ class ServiceabilityService:
             # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
-                msg="Error while fecthing pincode details: {}".format(str(e)),
+                msg="Error while fetching pincode details: {}".format(str(e)),
             )
             # Return a general internal server error response
             return GenericResponseModel(

@@ -109,8 +109,7 @@ class PickupLocationService:
                 db.query(Pickup_Location)
                 .filter(
                     Pickup_Location.client_id == client_id,
-                    Pickup_Location.location_name
-                    == pickup_location_data.location_name,
+                    Pickup_Location.location_name == pickup_location_data.location_name,
                     Pickup_Location.is_deleted == False,
                 )
                 .first()
@@ -119,7 +118,7 @@ class PickupLocationService:
             if existing_location:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.CONFLICT,
-                    message="Location name already exists",
+                    message="A location with this name already exists",
                     data={"location_code": existing_location.location_code},
                 )
 
@@ -173,9 +172,7 @@ class PickupLocationService:
                 location_data["is_default"] = True
 
             # Create the location
-            location_model_instance = Pickup_Location.create_db_entity(
-                location_data
-            )
+            location_model_instance = Pickup_Location.create_db_entity(location_data)
             db.add(location_model_instance)
             db.flush()
 

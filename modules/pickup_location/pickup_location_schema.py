@@ -1,5 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import Optional, Dict, Union, List
+import re
 
 # schema
 from schema.base import DBBaseModel
@@ -22,6 +23,49 @@ class PickupLocationInsertModel(BaseModel):
     location_type: str
     is_default: Optional[bool] = False  # Allow setting default when creating
 
+    @field_validator(
+        "location_name",
+        "contact_person_name",
+        "address",
+        "landmark",
+        "city",
+        "state",
+        "country",
+        "location_type",
+    )
+    @classmethod
+    def sanitize_text_fields(cls, v: str) -> str:
+        """Trim whitespace and remove extra spaces from text fields"""
+        if v is None:
+            return v
+        # Strip leading/trailing whitespace
+        v = v.strip()
+        # Replace multiple spaces with single space
+        v = re.sub(r"\s+", " ", v)
+        return v
+
+    @field_validator("contact_person_email")
+    @classmethod
+    def sanitize_email(cls, v: str) -> str:
+        """Convert email to lowercase and trim whitespace"""
+        if v is None:
+            return v
+        # Strip whitespace and convert to lowercase
+        v = v.strip().lower()
+        # Remove any spaces within the email
+        v = re.sub(r"\s+", "", v)
+        return v
+
+    @field_validator("alternate_phone")
+    @classmethod
+    def sanitize_alternate_phone(cls, v: Optional[str]) -> str:
+        """Remove whitespace and non-numeric characters from alternate phone"""
+        if not v:
+            return ""
+        # Remove all whitespace and non-numeric characters
+        v = re.sub(r"\D", "", v)
+        return v
+
 
 class PickupLocationUpdateModel(BaseModel):
     """Model for updating a pickup location - all fields optional"""
@@ -38,6 +82,49 @@ class PickupLocationUpdateModel(BaseModel):
     state: Optional[str] = None
     country: Optional[str] = None
     location_type: Optional[str] = None
+
+    @field_validator(
+        "location_name",
+        "contact_person_name",
+        "address",
+        "landmark",
+        "city",
+        "state",
+        "country",
+        "location_type",
+    )
+    @classmethod
+    def sanitize_text_fields(cls, v: Optional[str]) -> Optional[str]:
+        """Trim whitespace and remove extra spaces from text fields"""
+        if v is None:
+            return v
+        # Strip leading/trailing whitespace
+        v = v.strip()
+        # Replace multiple spaces with single space
+        v = re.sub(r"\s+", " ", v)
+        return v
+
+    @field_validator("contact_person_email")
+    @classmethod
+    def sanitize_email(cls, v: Optional[str]) -> Optional[str]:
+        """Convert email to lowercase and trim whitespace"""
+        if v is None:
+            return v
+        # Strip whitespace and convert to lowercase
+        v = v.strip().lower()
+        # Remove any spaces within the email
+        v = re.sub(r"\s+", "", v)
+        return v
+
+    @field_validator("alternate_phone")
+    @classmethod
+    def sanitize_alternate_phone(cls, v: Optional[str]) -> Optional[str]:
+        """Remove whitespace and non-numeric characters from alternate phone"""
+        if not v:
+            return v
+        # Remove all whitespace and non-numeric characters
+        v = re.sub(r"\D", "", v)
+        return v
 
 
 class PickupLocationModel(PickupLocationInsertModel, DBBaseModel):

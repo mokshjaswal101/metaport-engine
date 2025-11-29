@@ -1247,3 +1247,186 @@
 #         message="CSV file RTO.csv not found in root directory",
 #         status=False,
 #     )
+
+
+def upload_pincode_master(excel_file_path: str, update_existing: bool = True):
+    """
+    Upload pincode master data from Excel file to pincode_mapping table.
+    
+    Args:
+        excel_file_path: Path to the Excel file with headers: Pincode, State, City
+        update_existing: If True, updates existing records. If False, skips duplicates.
+    
+    Returns:
+        dict: Summary with counts of inserted, updated, skipped, and error records
+    """
+    import pandas as pd
+    import os
+    from database.db import SessionLocal
+    from models.pincode_mapping import Pincode_Mapping
+    from logger import logger
+    
+    if not os.path.exists(excel_file_path):
+        raise FileNotFoundError(f"Excel file not found: {excel_file_path}")
+    
+    # Read Excel file
+    try:
+        df = pd.read_excel(excel_file_path)
+    except Exception as e:
+        raise ValueError(f"Error reading Excel file: {str(e)}")
+    
+    # Normalize column names (case-insensitive, strip whitespace)
+    df.columns = df.columns.str.strip()
+    expected_columns = ['Pincode', 'State', 'City']
+    
+    # Check if required columns exist (case-insensitive)
+    df_columns_lower = [col.lower() for col in df.columns]
+    missing_columns = []
+    for col in expected_columns:
+        if col.lower() not in df_columns_lower:
+            missing_columns.append(col)
+    
+    if missing_columns:
+        raise ValueError(
+            f"Missing required columns: {missing_columns}. "
+            f"Found columns: {list(df.columns)}"
+        )
+    
+    # Normalize column names to match expected format
+    column_mapping = {}
+    for col in df.columns:
+        if col.lower() == 'pincode':
+            column_mapping[col] = 'Pincode'
+        elif col.lower() == 'state':
+            column_mapping[col] = 'State'
+        elif col.lower() == 'city':
+            column_mapping[col] = 'City'
+    
+    df = df.rename(columns=column_mapping)
+    
+    # Select only required columns
+    df = df[['Pincode', 'State', 'City']].copy()
+    
+    # Remove rows with missing pincode
+    df = df.dropna(subset=['Pincode'])
+    
+    # Convert pincode to integer (handle any string pincodes)
+    try:
+        df['Pincode'] = df['Pincode'].astype(int)
+    except ValueError as e:
+        raise ValueError(f"Invalid pincode values found. All pincodes must be numeric: {str(e)}")
+    
+    # Clean and validate data
+    df['State'] = df['State'].astype(str).str.strip()
+    df['City'] = df['City'].astype(str).str.strip()
+    
+    # Remove rows with empty state or city
+    df = df[(df['State'] != '') & (df['City'] != '') & (df['State'] != 'nan') & (df['City'] != 'nan')]
+    
+    # Normalize to lowercase for consistency (all comparisons use .lower() in codebase)
+    df['State'] = df['State'].str.lower()
+    df['City'] = df['City'].str.lower()
+    
+    # Truncate state and city to 50 characters (matching DB schema)
+    df['State'] = df['State'].str[:50]
+    df['City'] = df['City'].str[:50]
+    
+    # Sort by pincode ascending before processing
+    df = df.sort_values(by='Pincode', ascending=True).reset_index(drop=True)
+    
+    # Get database session
+    db = SessionLocal()
+    
+    try:
+        inserted_count = 0
+        updated_count = 0
+        skipped_count = 0
+        error_count = 0
+        errors = []
+        
+        # Process in batches for better performance
+        batch_size = 1000
+        total_rows = len(df)
+        
+        logger.info(f"Starting pincode master upload. Total rows to process: {total_rows}")
+        
+        for i in range(0, total_rows, batch_size):
+            batch_df = df.iloc[i:i+batch_size]
+            batch_records = []
+            
+            for _, row in batch_df.iterrows():
+                try:
+                    pincode = int(row['Pincode'])
+                    # Values are already normalized to lowercase in dataframe processing above
+                    state = str(row['State'])
+                    city = str(row['City'])
+                    
+                    # Check if record already exists
+                    existing = db.query(Pincode_Mapping).filter(
+                        Pincode_Mapping.pincode == pincode
+                    ).first()
+                    
+                    if existing:
+                        if update_existing:
+                            # Update existing record
+                            existing.state = state
+                            existing.city = city
+                            updated_count += 1
+                        else:
+                            # Skip duplicate
+                            skipped_count += 1
+                    else:
+                        # Prepare new record for bulk insert
+                        batch_records.append({
+                            'pincode': pincode,
+                            'state': state,
+                            'city': city
+                        })
+                        
+                except Exception as e:
+                    error_count += 1
+                    errors.append({
+                        'pincode': row.get('Pincode', 'N/A'),
+                        'error': str(e)
+                    })
+                    logger.error(f"Error processing row with pincode {row.get('Pincode', 'N/A')}: {str(e)}")
+                    continue
+            
+            # Bulk insert new records
+            if batch_records:
+                try:
+                    db.bulk_insert_mappings(Pincode_Mapping, batch_records)
+                    inserted_count += len(batch_records)
+                    logger.info(f"Inserted batch: {len(batch_records)} records (Total inserted so far: {inserted_count})")
+                except Exception as e:
+                    error_count += len(batch_records)
+                    logger.error(f"Error bulk inserting batch: {str(e)}")
+                    for record in batch_records:
+                        errors.append({
+                            'pincode': record.get('pincode', 'N/A'),
+                            'error': str(e)
+                        })
+            
+            # Commit after each batch
+            db.commit()
+            logger.info(f"Processed batch {i//batch_size + 1}/{(total_rows-1)//batch_size + 1}")
+        
+        summary = {
+            'total_rows_in_file': total_rows,
+            'inserted': inserted_count,
+            'updated': updated_count,
+            'skipped': skipped_count,
+            'errors': error_count,
+            'error_details': errors[:10] if errors else []  # Show first 10 errors
+        }
+        
+        logger.info(f"Pincode master upload completed. Summary: {summary}")
+        
+        return summary
+        
+    except Exception as e:
+        db.rollback()
+        logger.error(f"Error during pincode master upload: {str(e)}")
+        raise
+    finally:
+        db.close()

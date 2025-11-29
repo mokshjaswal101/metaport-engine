@@ -17,13 +17,18 @@ from database import DBBaseClass, DBBase
 from context_manager.context import get_db_session
 
 
-# Database sequence for generating unique location codes (thread-safe)
-pickup_location_code_seq = Sequence("pickup_location_code_seq", start=1, increment=1)
-
-
 class Pickup_Location(DBBase, DBBaseClass):
 
     __tablename__ = "pickup_location"
+
+    # Database sequence for generating unique location codes (thread-safe)
+    # Defined as class attribute so it's bound to the table metadata
+    _location_code_seq = Sequence(
+        "pickup_location_code_seq",
+        start=1,
+        increment=1,
+        metadata=DBBase.metadata,  # Bind to the metadata so it gets created with the table
+    )
 
     location_name = Column(String(100), nullable=False)
     contact_person_name = Column(String(100), nullable=False)
