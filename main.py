@@ -18,7 +18,10 @@ from utils.exception_handler import (
 from router import CommonRouter, DefaultRouter, StatusRouter, OpenRouter
 from modules.authentication import auth_router
 
-from database.db import init_models  # sync DB init
+# ----------------------------
+# FIX: Async DB Engine Import
+# ----------------------------
+from database.db import async_engine, DBBase  # <-- FIXED (correct for async)
 
 app = FastAPI()
 
@@ -43,9 +46,9 @@ app.add_middleware(
 )
 
 # Queue + worker config
-NUM_WORKERS = 20  # Number of parallel workers
-QUEUE_MAX_SIZE = 1000  # Maximum queue size
-TIMEOUT_SECONDS = 30  # Wait timeout before returning 503
+NUM_WORKERS = 20
+QUEUE_MAX_SIZE = 1000
+TIMEOUT_SECONDS = 30
 
 request_queue = asyncio.Queue(maxsize=QUEUE_MAX_SIZE)
 
@@ -61,7 +64,6 @@ async def worker(worker_id: int):
     while True:
         request, call_next, response_future = await request_queue.get()
         try:
-            # Process the request
             response = await call_next(request)
             response_future.set_result(response)
         except Exception as e:
@@ -73,18 +75,22 @@ async def worker(worker_id: int):
             request_queue.task_done()
 
 
-# -------------------------------
-# Startup event
-# -------------------------------
+# ============================================================
+# 🔥 FIXED: Async table creation (NO MORE SYNC init_models)
+# ============================================================
 @app.on_event("startup")
 async def startup_event():
-    loop = asyncio.get_running_loop()
-    # Initialize DB safely in executor
-    await loop.run_in_executor(None, init_models)
+
+    # FIX: Async table creation
+    async with async_engine.begin() as conn:
+        await conn.run_sync(DBBase.metadata.create_all)
+
+    logger.info("✅ All tables created (async mode)")
 
     # Start workers
     for i in range(NUM_WORKERS):
         asyncio.create_task(worker(i))
+
     logger.info(f"Started {NUM_WORKERS} workers for request queue")
 
 
@@ -139,7 +145,7 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 
 # -------------------------------
-# Optional: Global rate limiter
+# Global rate limiter
 # -------------------------------
 import time
 
@@ -152,7 +158,6 @@ request_timestamps = []
 async def rate_limit_middleware(request: Request, call_next):
     global request_timestamps
     now = time.time()
-    # keep timestamps within 1 second
     request_timestamps = [t for t in request_timestamps if now - t < WINDOW_SECONDS]
     if len(request_timestamps) >= MAX_REQUESTS_PER_SECOND:
         return JSONResponse({"detail": "Too many requests, slow down"}, status_code=429)

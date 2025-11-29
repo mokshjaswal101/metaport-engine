@@ -40,6 +40,7 @@ from modules.shipping_notifications.shipping_notifications_controller import (
 )
 
 from modules.channels.channel_controller import router as channel_router
+from modules.qc.qc_controller import qc_router
 
 
 # settings
@@ -88,3 +89,4 @@ CommonRouter.include_router(ndr_router)
 CommonRouter.include_router(courier_allocation_router)
 CommonRouter.include_router(billing_invoice_router)
 CommonRouter.include_router(channel_router)
+CommonRouter.include_router(qc_router)
