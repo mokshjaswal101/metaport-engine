@@ -94,6 +94,7 @@ class Order_create_request_model(
     package_details,
 ):
     products: List[product]
+    qc_reason: Optional[str] = None
 
 
 class Order_Base_Model(Order_create_request_model):
@@ -244,7 +245,7 @@ class dev_return_pickup_details(BaseModel):
 class dev_return_location_details(BaseModel):
     """Return location details - maps pickup_location_code to return_location_code"""
 
-    return_location_code: str
+    pickup_location_code: str
 
 
 class dev_return_payment_details(BaseModel):

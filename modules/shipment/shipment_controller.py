@@ -100,9 +100,11 @@ async def assign_awb(shipment_params: CreateShipmentModel):
 )
 async def assign_awb(shipment_params: CreateShipmentModel):
     try:
-        response: GenericResponseModel = ShipmentService.assign_reverse_awb(
+        # If your service function is async, use await:
+        response: GenericResponseModel = await ShipmentService.assign_reverse_awb(
             shipment_params=shipment_params
         )
+
         return build_api_response(response)
 
     except Exception as e:
@@ -218,6 +220,31 @@ async def cancel_shipments(cancel_shipment_request: CancelshipmentRequestSchema)
         response: GenericResponseModel = ShipmentService.cancel_shipments(
             awb_numbers=cancel_shipment_request.awb_numbers
         )
+        return build_api_response(response)
+
+    except Exception as e:
+        return build_api_response(
+            GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                data=str(e),
+                message="Could not cancel shipment",
+            )
+        )
+
+
+@shipment_router.post(
+    "/reverse/cancel/awbs",
+    status_code=http.HTTPStatus.OK,
+    response_model=GenericResponseModel,
+)
+async def reverse_cancel_shipments(
+    cancel_shipment_request: CancelshipmentRequestSchema,
+):
+    try:
+        response: GenericResponseModel = await ShipmentService.reverse_cancel_shipments(
+            awb_numbers=cancel_shipment_request.awb_numbers
+        )
+
         return build_api_response(response)
 
     except Exception as e:

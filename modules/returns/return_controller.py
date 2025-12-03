@@ -38,7 +38,7 @@ async def create_order(
     order_data: Order_create_request_model,
 ):
     try:
-        response: GenericResponseModel = ReturnService.create_order(
+        response: GenericResponseModel = await ReturnService.dev_create_return_order(
             order_data=order_data
         )
         return build_api_response(response)
@@ -63,8 +63,10 @@ async def get_order_using_awb_or_order_Id_order(
     get_Order_Usging_AWB_OR_Order_Id: Get_Order_Usging_AWB_OR_Order_Id,
 ):
     try:
-        response: GenericResponseModel = ReturnService.Get_Order_Using_Awb_OR_OrderId(
-            get_Order_Usging_AWB_OR_Order_Id=get_Order_Usging_AWB_OR_Order_Id
+        response: GenericResponseModel = (
+            await ReturnService.Get_Order_Using_Awb_OR_OrderId(
+                get_Order_Usging_AWB_OR_Order_Id=get_Order_Usging_AWB_OR_Order_Id
+            )
         )
         return build_api_response(response)
 
@@ -73,7 +75,7 @@ async def get_order_using_awb_or_order_Id_order(
             GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
-                message="An error occurred while creating the order.",
+                message="An error occurred while fetching the order.",
             )
         )
 
@@ -86,7 +88,8 @@ async def get_order_using_awb_or_order_Id_order(
 )
 async def update_order(order_id: str, order_data: Order_create_request_model):
     try:
-        response: GenericResponseModel = ReturnService.update_order(
+        # Await the async update_order service
+        response: GenericResponseModel = await ReturnService.update_order(
             order_id=order_id, order_data=order_data
         )
         return build_api_response(response)
@@ -96,7 +99,7 @@ async def update_order(order_id: str, order_data: Order_create_request_model):
             GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
-                message="An error occurred while creating the order.",
+                message="An error occurred while updating the order.",
             )
         )
 
@@ -176,7 +179,7 @@ async def create_order(data: bulkCancelOrderModel):
 )
 async def get_all_orders(order_filters: Order_filters):
     try:
-        response: GenericResponseModel = ReturnService.get_all_orders(
+        response: GenericResponseModel = await ReturnService.get_all_return_orders(
             order_filters=order_filters
         )
         return build_api_response(response)
@@ -191,6 +194,28 @@ async def get_all_orders(order_filters: Order_filters):
         )
 
 
+# # get all orders for a user
+# @return_router.post(
+#     "/export",
+#     status_code=http.HTTPStatus.CREATED,
+# )
+# async def export_orders(order_filters: Order_Export_Filters):
+#     try:
+#         response: GenericResponseModel = ReturnService.export_orders(
+#             order_filters=order_filters
+#         )
+#         return response
+
+#     except Exception as e:
+#         return build_api_response(
+#             GenericResponseModel(
+#                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+#                 data=str(e),
+#                 message="An error occurred while export report.",
+#             )
+#         )
+
+
 # get all orders for a user
 @return_router.post(
     "/export",
@@ -198,7 +223,8 @@ async def get_all_orders(order_filters: Order_filters):
 )
 async def export_orders(order_filters: Order_Export_Filters):
     try:
-        response: GenericResponseModel = ReturnService.export_orders(
+        #  IMPORTANT: Await the async service function
+        response: GenericResponseModel = await ReturnService.export_orders(
             order_filters=order_filters
         )
         return response
@@ -213,7 +239,7 @@ async def export_orders(order_filters: Order_Export_Filters):
         )
 
 
-# get the status count of all ordes
+# get the status count of all orders
 @return_router.post(
     "/status",
     status_code=http.HTTPStatus.CREATED,
@@ -221,17 +247,20 @@ async def export_orders(order_filters: Order_Export_Filters):
 )
 async def get_order_status_counts(order_status_filter: Order_Status_Filters):
     try:
-        response: GenericResponseModel = ReturnService.get_order_status_counts(
+        # Call your service function
+        response: GenericResponseModel = await ReturnService.get_order_status_counts(
             order_status_filter=order_status_filter
         )
+
         return build_api_response(response)
 
     except Exception as e:
         return build_api_response(
             GenericResponseModel(
+                status=False,
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                data=str(e),
                 message="An error occurred while fetching the orders status.",
+                data=str(e),
             )
         )
 
@@ -332,9 +361,10 @@ async def put_order(order: Dict[Any, Any]):
 async def dev_create_return_order(
     order_data: Dev_Return_Order_Create_Request_Model,
 ):
-    """Development endpoint for creating return orders with shadowfax courier"""
+    """Development endpoint for creating return orders with Shadowfax courier"""
     try:
-        response: GenericResponseModel = ReturnService.dev_create_return_order(
+        # Await the async service function
+        response: GenericResponseModel = await ReturnService.dev_create_return_order(
             order_data=order_data
         )
         return build_api_response(response)
@@ -366,5 +396,53 @@ async def dev_cancel_return_awbs():
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
                 message="An error occurred while canceling the return AWBs.",
+            )
+        )
+
+
+@return_router.delete(
+    "/delete/{order_id}",
+    status_code=http.HTTPStatus.OK,
+    response_model=GenericResponseModel,
+)
+async def delete_order(order_id: str):
+    try:
+        response: GenericResponseModel = await ReturnService.delete_order(
+            order_id=order_id
+        )
+        return build_api_response(response)
+
+    except Exception as e:
+        return build_api_response(
+            GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                data=str(e),
+                message="An error occurred while deleting the order.",
+                status=False,
+            )
+        )
+
+
+#
+
+
+@return_router.post(
+    "/edit_order_fetch",
+    status_code=http.HTTPStatus.CREATED,
+    response_model=GenericResponseModel,
+)
+async def edit_order_fetch(edit_order_fetch: Get_Order_Usging_AWB_OR_Order_Id):
+    try:
+        response: GenericResponseModel = await ReturnService.edit_order_fetch(
+            edit_order_fetch=edit_order_fetch
+        )
+        return build_api_response(response)
+
+    except Exception as e:
+        return build_api_response(
+            GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                data=str(e),
+                message="An error occurred while fetching the orders.",
             )
         )

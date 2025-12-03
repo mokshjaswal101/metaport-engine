@@ -1467,195 +1467,283 @@ class ShipmentService:
                 db.close()
 
     @staticmethod
-    def assign_reverse_awb(
+    async def assign_reverse_awb(
         shipment_params: CreateShipmentModel,
     ):
-
+        db: AsyncSession = None
         try:
-
             order_id = shipment_params.order_id
             courier_id = shipment_params.contract_id
-
             client_id = context_user_data.get().client_id
-
-            db = get_db_session()
-
-            order = (
-                db.query(Return_Order)
-                .filter(
-                    Return_Order.client_id == client_id,
-                    Return_Order.order_id == order_id,
-                )
-                .first()
-            )
-
-            if order.status != "new":
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message="Shipment already processed",
-                )
-
-            client_contract = (
-                db.query(New_Company_To_Client_Rate)
-                .filter(New_Company_To_Client_Rate.id == courier_id)
-                .options(
-                    joinedload(New_Company_To_Client_Rate.company_contract).joinedload(
-                        Company_Contract.shipping_partner
-                    ),
-                    joinedload(New_Company_To_Client_Rate.aggregator_courier),
-                )
-                .first()
-            )
-
-            if client_id == 82 and courier_id == 419 and order.zone == "E":
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message="Non Serviceable Pincode",
-                )
-
-            # freight = ServiceabilityService.calculate_freight(
-            #     order_id=order_id,
-            #     min_chargeable_weight=client_contract.aggregator_courier.min_chargeable_weight,
-            #     additional_weight_bracket=client_contract.aggregator_courier.additional_weight_bracket,
-            #     contract_id=courier_id,
-            #     rate_type="reverse",
-            # )
-            freight = ServiceabilityService.calculate_freight(
-                order_id=order_id,
-                min_chargeable_weight=client_contract.aggregator_courier.min_chargeable_weight,
-                additional_weight_bracket=client_contract.aggregator_courier.additional_weight_bracket,
-                contract_id=courier_id,
-                contract_data=ShipmentService.model_to_dict(client_contract),
-                rate_type="reverse",
-            )
-
-            total_freight = (
-                freight["freight"] + freight["cod_charges"] + freight["tax_amount"]
-            )
-
-            # return False
-            # check if the wallet has sufficient balance or not
-            has_sufficient_balance = WalletService.check_sufficient_balance(
-                PER_ORDER_CHARGE
-            )
-
-            # if the wallet does not have sufficient balance, throw error
-            if has_sufficient_balance.status == False:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message=has_sufficient_balance.message,
-                )
-
-            # shipping_partner_slug = "xpressbees"
-            shipping_partner_slug = (
-                client_contract.company_contract.shipping_partner.slug
-            )
-
-            # create the shipment based on the courier parnter selected
-            shipping_partner = courier_service_mapping[shipping_partner_slug]
-
-            if shipping_partner_slug == "logistify":
-                # store the freight data in db
-                order.forward_freight = freight["freight"]
-                order.forward_cod_charge = freight["cod_charges"]
-                order.forward_tax = freight["tax_amount"]
-
-                db.add(order)
-                db.commit()
-            # Use the create order function of the required shipping partner service
-            shipment_response = shipping_partner.create_reverse_order(
-                order,
-                client_contract.company_contract.credentials,
-                client_contract.aggregator_courier,
-            )
-
-            # if the shipment is created successfully, i.e, the awb is assigned, deduct from wallet
-            if shipment_response.status == True:
-                order.booking_date = datetime.now(timezone.utc)
-                try:
-                    if client_id == 93:
-                        body = {
-                            "awb": order.awb_number,
-                            "current_status": "booked",
-                            "order_id": order.order_id,
-                            "current_timestamp": datetime.now().strftime(
-                                "%d-%m-%Y %H:%M:%S"
-                            ),
-                            "shipment_status": order.sub_status,
-                            "scans": [],
-                        }
-
-                        response = requests.post(
-                            url="https://wtpzsmej1h.execute-api.ap-south-1.amazonaws.com/prod/webhook/bluedart",
-                            verify=True,
-                            timeout=10,
-                            json=body,
-                        )
-
-                        print(response.json())
-
-                except:
-                    pass
-
-                is_processing = shipment_response.data.get("processing", None)
-
-                order.booking_date = datetime.now(timezone.utc)
-
-                # store the freight data in db
-                order.forward_freight = freight["freight"]
-                order.forward_cod_charge = freight["cod_charges"]
-                order.forward_tax = freight["tax_amount"]
-
-                db.add(order)
-
-                if is_processing:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        data={"is_processing": True},
-                        message="Orders are being processed",
+            # async DB session
+            async with get_db_session() as db:
+                #  1. Fetch order
+                result = await db.execute(
+                    select(Return_Order).where(
+                        Return_Order.client_id == client_id,
+                        Return_Order.order_id == order_id,
                     )
-
-                WalletService.deduct_money(
-                    PER_ORDER_CHARGE, shipment_response.data["awb_number"]
+                )
+                order = result.scalar_one_or_none()
+                if not order:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.NOT_FOUND, message="Order not found"
+                    )
+                if order.status != "new":
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.BAD_REQUEST,
+                        message="Shipment already processed",
+                    )
+                # Fetch client contract
+                stmt = (
+                    select(New_Company_To_Client_Rate)
+                    .options(
+                        joinedload(
+                            New_Company_To_Client_Rate.client_contract
+                        ).joinedload(Client_Contract.shipping_partner)
+                    )
+                    .where(
+                        New_Company_To_Client_Rate.id == courier_id,
+                        New_Company_To_Client_Rate.client_id == client_id,
+                        New_Company_To_Client_Rate.isActive == True,
+                    )
+                )
+                result = await db.execute(stmt)
+                client_contract = result.scalar_one_or_none()
+                print("VALUE PER ACTION")
+                if not client_contract:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.BAD_REQUEST,
+                        message="Invalid courier/contract selection",
+                    )
+                #  3. Freight Calculation (sync → kept sync)
+                freight = await ServiceabilityService.calculate_freight(
+                    order_id=order_id,
+                    min_chargeable_weight=0.5,
+                    additional_weight_bracket=0.5,
+                    contract_id=courier_id,
+                    contract_data=ShipmentService.model_to_dict(client_contract),
+                    rate_type="reverse",
+                )
+                total_freight = (
+                    freight["freight"] + freight["cod_charges"] + freight["tax_amount"]
+                )
+                print("VALUE PER ACTION 123")
+                #  4. Wallet Balance Check (sync)
+                has_sufficient_balance = await WalletService.check_sufficient_balance(
+                    PER_ORDER_CHARGE
                 )
 
-                # if the payment of the order is COD, add the cod amount to the provisional COD in wallet
-                if order.payment_mode.lower() == "cod":
-                    WalletService.add_provisional_cod(order.total_amount)
+                if not has_sufficient_balance.status:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.BAD_REQUEST,
+                        message=has_sufficient_balance.message,
+                    )
+                # shipping_partner_slug = (
+                #     client_contract.client_contract.shipping_partner.slug
+                # )
+                print("VALUE PER ACTION 124")
+                shipping_partner_slug = "shadowfax"
+                shipping_partner = courier_service_mapping[shipping_partner_slug]
+                #  5. Store freight before booking
+                if shipping_partner_slug == "logistify":
+                    order.forward_freight = freight["freight"]
+                    order.forward_cod_charge = freight["cod_charges"]
+                    order.forward_tax = freight["tax_amount"]
+                    db.add(order)
+                    await db.commit()
+                #  6. Call shipping partner API (sync → kept sync)
+                print("VALUE PER ACTION 125")
+                shipment_response = await shipping_partner.create_reverse_order(
+                    order,
+                    client_contract.client_contract.credentials,
+                    client_contract.client_contract.shipping_partner,
+                )
+                #  7. Shipment Success Logic
+                if shipment_response.status:
+                    order.booking_date = datetime.now(timezone.utc)
+                    # Save freight
+                    order.forward_freight = freight["freight"]
+                    order.forward_cod_charge = freight["cod_charges"]
+                    order.forward_tax = freight["tax_amount"]
+                    db.add(order)
+                    # If courier returns processing state
+                    if shipment_response.data.get("processing"):
+                        await db.commit()
+                        return GenericResponseModel(
+                            status_code=http.HTTPStatus.OK,
+                            data={"is_processing": True},
+                            message="Orders are being processed",
+                        )
+                    # Deduct amount
+                    WalletService.deduct_money(
+                        PER_ORDER_CHARGE, shipment_response.data["awb_number"]
+                    )
+                    # COD Logic
+                    if order.payment_mode.lower() == "cod":
+                        WalletService.add_provisional_cod(order.total_amount)
 
-                db.flush()
-                db.commit()
-
-            return shipment_response
-
+                    await db.commit()
+                return shipment_response
         except DatabaseError as e:
-            # Log database error
             logger.error(
                 extra=context_user_data.get(),
-                msg="Error posting shipment: {}".format(str(e)),
+                msg=f"Database Error: {str(e)}",
             )
-
-            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while posting the shipment.",
+                message="Database error occurred while posting shipment.",
             )
 
         except Exception as e:
-            # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
+                msg=f"Unhandled Error: {str(e)}",
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
+                message="Internal server error. Please try again later.",
             )
-
         finally:
             if db:
-                db.close()
+                try:
+                    await db.close()
+                except Exception:
+                    pass
+
+    @staticmethod
+    async def reverse_cancel_shipments(awb_numbers: List[str]):
+        try:
+            print("welcome to cancel order section *****")
+            client_id = context_user_data.get().client_id
+
+            results = []  # collect status for each AWB
+
+            for awb_number in awb_numbers:
+                try:
+                    async with get_db_session() as db:
+
+                        print(awb_number, "<<awb_number>>")
+
+                        # Fetch order
+                        db_result = await db.execute(
+                            select(Return_Order).where(
+                                Return_Order.client_id == client_id,
+                                Return_Order.awb_number == awb_number,
+                            )
+                        )
+                        order = db_result.scalar_one_or_none()
+
+                        if not order:
+                            results.append(
+                                {
+                                    "awb": awb_number,
+                                    "status": False,
+                                    "message": "Invalid AWB number",
+                                }
+                            )
+                            continue
+
+                        # Status validation
+                        allowed = order.status in {"new", "booked"} or (
+                            order.status == "pickup"
+                            and order.sub_status
+                            not in {"picked up", "pickup completed"}
+                        )
+
+                        if not allowed:
+                            results.append(
+                                {
+                                    "awb": awb_number,
+                                    "status": False,
+                                    "message": "Shipment already in transit",
+                                }
+                            )
+                            continue
+
+                        # Shipping partner
+                        shipping_partner = courier_service_mapping["shadowfax"]
+
+                        # CALL SHADOWFAX CANCEL API
+                        cancel_response = (
+                            await shipping_partner.cancel_reverse_shipment(
+                                order=order, awb_number=awb_number
+                            )
+                        )
+
+                        if not getattr(cancel_response, "status", False):
+                            results.append(
+                                {
+                                    "awb": awb_number,
+                                    "status": False,
+                                    "message": cancel_response.message,
+                                }
+                            )
+                            continue
+
+                        # Update order fields
+                        order.status = "new"
+                        order.sub_status = "new"
+                        order.is_label_generated = False
+                        order.cancel_count += 1
+                        order.tracking_info = []
+
+                        new_activity = {
+                            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "message": "Shipment Cancelled",
+                            "data": {
+                                "aggregator": order.aggregator,
+                                "courier_partner": order.courier_partner,
+                                "awb_number": awb_number,
+                            },
+                            "user_data": context_user_data.get().id,
+                        }
+                        order.action_history.append(new_activity)
+
+                        # Clear shipping partner fields
+                        order.aggregator = None
+                        order.courier_partner = None
+                        order.courier_status = None
+                        order.awb_number = None
+                        order.shipping_partner_order_id = None
+                        order.shipping_partner_shipping_id = None
+
+                        # Refund wallet
+                        refund_amount = (
+                            (order.forward_freight or 0)
+                            + (order.forward_cod_charge or 0)
+                            + (order.forward_tax or 0)
+                        )
+
+                        order.forward_freight = None
+                        order.forward_cod_charge = None
+                        order.forward_tax = None
+                        print(jsonable_encoder(order), "<<order>>")
+                        db.add(order)
+                        await db.commit()
+
+                        results.append(
+                            {
+                                "awb": awb_number,
+                                "status": True,
+                                "message": "Cancelled successfully",
+                            }
+                        )
+
+                except Exception as e:
+                    results.append(
+                        {"awb": awb_number, "status": False, "message": str(e)}
+                    )
+                    continue
+
+            return GenericResponseModel(
+                status=True, status_code=200, message="Processed all AWBs", data=results
+            )
+
+        except Exception as e:
+            return GenericResponseModel(
+                status=False, status_code=500, message=f"Unhandled error: {str(e)}"
+            )
 
     @staticmethod
     def bulk_assign_awbs(

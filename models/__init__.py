@@ -72,3 +72,4 @@ from .client_channel_integration import ClientChannelIntegration
 from .integration_sync_log import IntegrationSyncLog
 
 from .courier_billing import CourierBilling
+from .qc import Qc

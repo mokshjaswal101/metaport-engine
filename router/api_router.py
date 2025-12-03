@@ -41,6 +41,10 @@ from modules.shipping_notifications.shipping_notifications_controller import (
 
 from modules.channels.channel_controller import router as channel_router
 
+from modules.qc.qc_controller import qc_router
+
+# from modules
+
 
 # settings
 from modules.documents.shipping_label.shipping_label_controller import label_router
@@ -66,7 +70,7 @@ CommonRouter.include_router(company_router)
 CommonRouter.include_router(client_router)
 CommonRouter.include_router(user_router)
 CommonRouter.include_router(order_router)
-# CommonRouter.include_router(return_router)
+CommonRouter.include_router(return_router)
 CommonRouter.include_router(pickup_router)
 CommonRouter.include_router(shipment_router)
 CommonRouter.include_router(wallet_router)
@@ -88,3 +92,4 @@ CommonRouter.include_router(ndr_router)
 CommonRouter.include_router(courier_allocation_router)
 CommonRouter.include_router(billing_invoice_router)
 CommonRouter.include_router(channel_router)
+CommonRouter.include_router(qc_router)

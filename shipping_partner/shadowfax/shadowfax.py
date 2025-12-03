@@ -6,7 +6,9 @@ from datetime import datetime
 import base64
 import unicodedata
 from pydantic import BaseModel
+from fastapi.encoders import jsonable_encoder
 import pytz
+import httpx
 from datetime import datetime, timedelta, timezone
 
 from utils.datetime import parse_datetime
@@ -23,7 +25,9 @@ from logger import logger
 import re
 
 # models
-from models import Pickup_Location, Order
+from models import Pickup_Location, Order, Qc
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
 
 # schema
 from schema.base import GenericResponseModel
@@ -277,185 +281,196 @@ class Shadowfax:
             )
 
     @staticmethod
-    def create_reverse_order(
+    async def create_reverse_order(
         order: Order_Model,
         credentials: Dict[str, str],
         delivery_partner: AggregatorCourierModel,
     ):
-
-        try:
-
-            client_id = context_user_data.get().client_id
-
-            token = credentials.get("token", None)
-
-            if not token:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.UNAUTHORIZED,
-                    status=False,
-                    message="Invalid Credentials",
-                )
-
-            db = get_db_session()
-
-            pickup_location = (
-                db.query(Pickup_Location)
-                .filter(
-                    Pickup_Location.client_id == client_id,
-                    Pickup_Location.location_code == order.pickup_location_code,
-                )
-                .first()
-            )
-
-            # print("token", token)
-
-            body = {
-                "client_order_number": "LM/" + str(client_id) + "/" + order.order_id,
-                "total_amount": float(order.total_amount),
-                "price": float(order.order_value),
-                "eway_bill": "",
-                "address_attributes": {
-                    "address_line": order.consignee_address
-                    + " "
-                    + order.consignee_landmark,
-                    "city": order.consignee_city,
-                    "country": "India",
-                    "pincode": order.consignee_pincode,
-                    "name": order.consignee_full_name,
-                    "phone_number": order.consignee_phone,
-                    "alternate_contact": order.consignee_alternate_phone,
-                },
-                "seller_attributes": {
-                    "name": pickup_location.contact_person_name,
-                    "address_line": pickup_location.address
-                    + " "
-                    + pickup_location.landmark,
-                    "city": pickup_location.city,
-                    "email": pickup_location.contact_person_email,
-                    "pincode": pickup_location.pincode,
-                    "phone": pickup_location.contact_person_phone,
-                    "unique_code": pickup_location.location_code,
-                },
-                "skus_attributes": [
-                    {
-                        "name": product["name"],
-                        "client_sku_id": product["sku_code"],
-                        "price": product["unit_price"],
-                        "qc_required": False,
-                        "invoice_id": "LM/" + str(client_id) + "/" + order.order_id,
-                    }
-                    for product in order.products
-                ],
-            }
-            headers = {
-                "Authorization": "Token " + token,
-                "Content-Type": "application/json",
-            }
-
-            api_url = "https://dale.shadowfax.in/api/v3/clients/requests"
-
-            response = requests.post(
-                api_url, json=body, headers=headers, verify=False, timeout=60
-            )
-
+        async with get_db_session() as db:
             try:
-                response_data = response.json()
-                print("api_respose", response_data)
+                client_id = context_user_data.get().client_id
+                token = "7186514310bef086c7e48f8abd482537acc4b553"
+                if not token:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.UNAUTHORIZED,
+                        status=False,
+                        message="Invalid Credentials",
+                    )
+                # ----------------------------------------------------------------------
+                # 1. Fetch Pickup Location
+                # ----------------------------------------------------------------------
+                result = await db.execute(
+                    select(Pickup_Location).where(
+                        Pickup_Location.client_id == client_id,
+                        Pickup_Location.location_code == order.pickup_location_code,
+                    )
+                )
+                pickup_location = result.scalar_one_or_none()
+                if not pickup_location:
+                    return GenericResponseModel(
+                        status=False,
+                        status_code=http.HTTPStatus.BAD_REQUEST,
+                        message="Pickup location not found",
+                    )
+                # ----------------------------------------------------------------------
+                # 2. Build SKUs With Conditional QC
+                # ----------------------------------------------------------------------
+                skus_attributes = []
+                for p in order.products:
+                    sku = {
+                        "name": p["name"],
+                        "client_sku_id": p["sku_code"],
+                        "price": p["unit_price"],
+                        "qc_required": False,
+                        "invoice_id": f"LM/{client_id}/{order.order_id}",
+                    }
+                    # ADD QC DETAILS ONLY IF order.qc_reason EXISTS
+                    if order.qc_reason:
+                        qc_result = await db.execute(
+                            select(
+                                Qc.category,
+                                Qc.reason_name,
+                                Qc.parameters_value,
+                                Qc.parameters_name,
+                                Qc.is_mandatory,
+                            ).where(
+                                Qc.client_id == client_id,
+                                Qc.reason_name == order.qc_reason,
+                            )
+                        )
+                        qc_list = qc_result.all()
+                        # Cross-check: Only run if qc_list has values
+                        if qc_list:
+                            qc_rules = [
+                                {
+                                    "question": r.parameters_name,
+                                    "value": r.parameters_value,
+                                    "is_mandatory": r.is_mandatory,
+                                }
+                                for r in qc_list
+                            ]
+                            sku.update(
+                                {
+                                    "category": qc_list[0].category,
+                                    "return_reason": order.qc_reason,
+                                    "qc_required": "true",
+                                    "qc_rules": qc_rules,
+                                }
+                            )
+                        else:
+                            sku.update(
+                                {
+                                    "qc_required": "false",
+                                    "qc_rules": [],
+                                }
+                            )
+                    skus_attributes.append(sku)
 
-            except ValueError as e:
-                logger.error("Failed to parse JSON response: %s", e)
+                # ----------------------------------------------------------------------
+                # 3. Create Final Payload
+                # ----------------------------------------------------------------------
+                body = {
+                    "client_order_number": f"LM/{client_id}/{order.order_id}",
+                    "total_amount": float(order.total_amount),
+                    "price": float(order.order_value),
+                    "eway_bill": "",
+                    "address_attributes": {
+                        "address_line": f"{order.consignee_address} {order.consignee_landmark}",
+                        "city": order.consignee_city,
+                        "country": "India",
+                        "pincode": order.consignee_pincode,
+                        "name": order.consignee_full_name,
+                        "phone_number": order.consignee_phone,
+                        "alternate_contact": order.consignee_alternate_phone,
+                    },
+                    "seller_attributes": {
+                        "name": pickup_location.contact_person_name,
+                        "address_line": f"{pickup_location.address} {pickup_location.landmark}",
+                        "city": pickup_location.city,
+                        "email": pickup_location.contact_person_email,
+                        "pincode": pickup_location.pincode,
+                        "phone": pickup_location.contact_person_phone,
+                        "unique_code": pickup_location.location_code,
+                    },
+                    "skus_attributes": skus_attributes,
+                }
+
+                headers = {
+                    "Authorization": f"Token {token}",
+                    "Content-Type": "application/json",
+                }
+
+                api_url = "https://dale.shadowfax.in/api/v3/clients/requests"
+                # ----------------------------------------------------------------------
+                # 4. Call API
+                # ----------------------------------------------------------------------
+                async with httpx.AsyncClient(timeout=60) as client:
+                    response = await client.post(api_url, json=body, headers=headers)
+
+                response_data = response.json()
+
+                if response_data.get("message") in ["Failure", "FAILED"]:
+                    errors = response_data.get("errors", "Unknown Error")
+                    if isinstance(errors, list):
+                        errors = ", ".join(errors)
+
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.BAD_REQUEST,
+                        message=str(errors),
+                    )
+
+                awb_number = response_data.get("awb_number")
+                if not awb_number:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.BAD_REQUEST,
+                        message="Failed to create shipment - AWB missing",
+                    )
+
+                # ----------------------------------------------------------------------
+                # 5. Update DB
+                # ----------------------------------------------------------------------
+                order.status = "pickup"
+                order.sub_status = "pickup pending"
+                order.courier_status = "BOOKED"
+                order.awb_number = awb_number
+                order.aggregator = "shadowfax"
+                order.shipping_partner_order_id = str(
+                    response_data["client_request_id"]
+                )
+                order.courier_partner = delivery_partner.slug
+                print("trigger")
+                order.action_history.append(
+                    {
+                        "event": "Shipment Created",
+                        "subinfo": f"delivery partner - {delivery_partner.slug}",
+                        "date": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
+                    }
+                )
+                print("trigger2")
+                db.add(order)
+                await db.commit()
+                print("trigger3")
+                return GenericResponseModel(
+                    status=True,
+                    status_code=http.HTTPStatus.OK,
+                    message="AWB assigned successfully",
+                    data={
+                        "awb_number": awb_number,
+                        "delivery_partner": delivery_partner.slug,
+                    },
+                )
+
+            except Exception as e:
+                logger.error(
+                    f"Unhandled error: {str(e)}", extra=context_user_data.get()
+                )
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                    message="Some error occurred while assigning AWB, please try again",
+                    message="An internal server error occurred.",
                 )
 
-            # If order creation failed at Shiperfecto, return message
-            if (
-                response_data["message"] == "Failure"
-                or response_data["message"] == "FAILED"
-            ):
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message=(
-                        ", ".join(response_data["errors"])
-                        if isinstance(response_data["errors"], list)
-                        else str(response_data["errors"])
-                    ),
-                )
-
-            # if order created successfully at shiperfecto
-
-            if response_data == None:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message="Failed to create shipment - data",
-                )
-
-            awb_number = response_data.get("awb_number", None)
-
-            if awb_number == None:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message="Failed to create shipment - awb",
-                )
-
-            # update status
-            order.status = "pickup"
-            order.sub_status = "pickup pending"
-            order.courier_status = "BOOKED"
-
-            order.awb_number = awb_number
-            order.aggregator = "shadowfax"
-            order.shipping_partner_order_id = str(response_data["client_request_id"])
-            order.courier_partner = delivery_partner.slug
-
-            new_activity = {
-                "event": "Shipment Created",
-                "subinfo": "delivery partner - " + delivery_partner.slug,
-                "date": datetime.now().strftime("%d-%m-%Y %H:%M:%S"),
-            }
-
-            # update the activity
-
-            order.action_history.append(new_activity)
-
-            db.add(order)
-            db.flush()
-
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.OK,
-                status=True,
-                data={
-                    "awb_number": awb_number,
-                    "delivery_partner": delivery_partner.slug,
-                },
-                message="AWB assigned successfully",
-            )
-
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error posting shipment: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while posting the shipment.",
-            )
-
-        except Exception as e:
-            # Log other unhandled exceptions
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
-            )
-            # Return a general internal server error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
-            )
+            finally:
+                await db.close()
 
     @staticmethod
     def track_shipment(order: Order_Model, awb_number: str, credentials=None):
@@ -567,16 +582,13 @@ class Shadowfax:
             )
 
     @staticmethod
-    def cancel_shipment(order: Order_Model, awb_number: str):
-
+    async def cancel_shipment(order: Order_Model, awb_number: str):
         try:
-
             api_url = "https://dale.shadowfax.in/api/v3/clients/orders/cancel/"
-
             print(api_url)
 
             headers = {
-                "Authorization": "Token " + "7186514310bef086c7e48f8abd482537acc4b553",
+                "Authorization": "Token 7186514310bef086c7e48f8abd482537acc4b553",
                 "Content-Type": "application/json",
             }
 
@@ -584,20 +596,17 @@ class Shadowfax:
                 "request_id": awb_number,
                 "cancel_remarks": "Request cancelled by customer",
             }
-
             print(body)
 
-            response = requests.post(
-                api_url, headers=headers, verify=False, json=body, timeout=10
-            )
+            async with httpx.AsyncClient(timeout=10) as client:
+                response = await client.post(
+                    api_url, headers=headers, json=body, verify=False
+                )
 
-            print(response)
-
-            # If tracking failed at Shiperfecto, return message
+            # Parse JSON response
             try:
                 response_data = response.json()
                 print(response_data)
-
             except ValueError as e:
                 print(str(e))
                 logger.error("Failed to parse JSON response: %s", e)
@@ -606,34 +615,27 @@ class Shadowfax:
                     message="Some error occurred while tracking, please try again",
                 )
 
-            # If order creation failed at Shiperfecto, return message
+            # Check API status
             if response.status_code != 200:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
-                    message=response_data["message"],
+                    message=response_data.get("message", "Unknown error"),
                 )
 
             if response.status_code == 200:
-
                 print(response)
-
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.OK,
                     status=True,
-                    message="order cancelled successfully",
+                    message="Order cancelled successfully",
                 )
 
         except DatabaseError as e:
-            # Log database error
-
             print(str(e))
-
             logger.error(
                 extra=context_user_data.get(),
-                msg="Error creating shipment: {}".format(str(e)),
+                msg=f"Error cancelling shipment: {str(e)}",
             )
-
-            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 data=str(e),
@@ -641,12 +643,74 @@ class Shadowfax:
             )
 
         except Exception as e:
-            # Log other unhandled exceptions
             logger.error(
                 extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
+                msg=f"Unhandled error: {str(e)}",
             )
-            # Return a general internal server error response
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                message="Error in tracking",
+            )
+
+    @staticmethod
+    async def cancel_reverse_shipment(order: Order_Model, awb_number: str):
+        try:
+            api_url = "https://dale.shadowfax.in/api/v3/clients/orders/cancel/"
+            print(api_url)
+
+            headers = {
+                "Authorization": "Token 7186514310bef086c7e48f8abd482537acc4b553",
+                "Content-Type": "application/json",
+            }
+            print(awb_number, "<awb_number>")
+            body = {
+                "request_id": awb_number,
+                "cancel_remarks": "Request cancelled by customer",
+            }
+            async with httpx.AsyncClient(timeout=50, verify=False) as client:
+                response = await client.post(api_url, headers=headers, json=body)
+
+            # Parse JSON
+            try:
+                response_data = response.json()
+                print(response_data, "||<response_data>||")
+            except ValueError as e:
+                logger.error("Failed to parse JSON response: %s", e)
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                    message="Some error occurred while tracking, please try again",
+                )
+
+            # Check API status
+            if response.status_code != 200:
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    message=response_data.get("message", "Unknown error"),
+                )
+
+            # Success
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.OK,
+                status=True,
+                message="Order cancelled successfully",
+            )
+
+        except DatabaseError as e:
+            logger.error(
+                extra=context_user_data.get(),
+                msg=f"Error cancelling shipment: {str(e)}",
+            )
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                data=str(e),
+                message="Some error occurred",
+            )
+
+        except Exception as e:
+            logger.error(
+                extra=context_user_data.get(),
+                msg=f"Unhandled error: {str(e)}",
+            )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Error in tracking",

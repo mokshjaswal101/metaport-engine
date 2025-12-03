@@ -38,7 +38,7 @@ class Return_Order(DBBase, DBBaseClass):
     pickup_location = relationship("Pickup_Location", lazy="noload")
 
     booking_date = Column(TIMESTAMP(timezone=True), nullable=False)
-    delivered_date = Column(TIMESTAMP(timezone=True), nullable=False)
+    delivered_date = Column(TIMESTAMP(timezone=True), nullable=True)
 
     # shipping details
     consignee_full_name = Column(String(100), nullable=False)
@@ -115,6 +115,7 @@ class Return_Order(DBBase, DBBaseClass):
     label_url = Column(String(255), nullable=True)  # optional
     invoice_url = Column(String(255), nullable=True)  # optional
     tracking_id = Column(String(255), nullable=True)  # optional
+    is_label_generated = Column(Boolean, nullable=False, default=False)
 
     status = Column(String(255), nullable=False)
     sub_status = Column(String(255), nullable=False)
@@ -136,7 +137,9 @@ class Return_Order(DBBase, DBBaseClass):
     source = Column(String(255), nullable=True)
     marketplace_order_id = Column(String(255), nullable=True)
 
-    edd = Column(TIMESTAMP(timezone=True), nullable=False)
+    edd = Column(TIMESTAMP(timezone=True), nullable=True)
+    qc_reason = Column(String(255), nullable=True)
+    cancel_count = Column(Integer, nullable=False, default=0)
 
     cod_remittance_cycle_id = Column(
         Integer, ForeignKey("cod_remittance.id"), nullable=True
