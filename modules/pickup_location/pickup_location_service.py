@@ -80,7 +80,7 @@ class PickupLocationService:
         try:
             user_data = context_user_data.get()
             client_id = user_data.client_id
-            user_id = getattr(user_data, "user_id", None)
+            user_id = getattr(user_data, "id", None)
             user_email = getattr(user_data, "email", None)
 
             # Extract is_default from request
@@ -689,6 +689,8 @@ class PickupLocationService:
                     | (Pickup_Location.address.ilike(search_term))
                     | (Pickup_Location.city.ilike(search_term))
                     | (Pickup_Location.pincode.ilike(search_term))
+                    | (Pickup_Location.contact_person_phone.ilike(search_term))
+                    | (Pickup_Location.contact_person_email.ilike(search_term))
                 )
 
             # Get total count
