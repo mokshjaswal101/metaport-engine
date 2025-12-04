@@ -4,6 +4,7 @@ from uuid import uuid4
 from sqlalchemy import (
     or_,
     desc,
+    asc,
     cast,
     func,
     text,
@@ -111,7 +112,7 @@ def serialize_pickup_location(pickup_location):
     """
     if pickup_location is None:
         return None
-    
+
     return {
         "location_code": pickup_location.location_code,
         "location_name": pickup_location.location_name,
@@ -4214,8 +4215,7 @@ class OrderService:
                 sku_codes_list = [term.strip() for term in sku_codes.split(",")]
                 # Use EXISTS subquery to filter orders by SKU code in order_item table
                 sku_conditions = [
-                    OrderItem.sku_code.ilike(f"%{sku}%")
-                    for sku in sku_codes_list
+                    OrderItem.sku_code.ilike(f"%{sku}%") for sku in sku_codes_list
                 ]
                 sku_exists = (
                     db.query(OrderItem.id)
@@ -4232,8 +4232,7 @@ class OrderService:
                 product_names = [term.strip() for term in product_name.split(",")]
                 # Use EXISTS subquery to filter orders by product name in order_item table
                 name_conditions = [
-                    OrderItem.name.ilike(f"%{name}%")
-                    for name in product_names
+                    OrderItem.name.ilike(f"%{name}%") for name in product_names
                 ]
                 name_exists = (
                     db.query(OrderItem.id)
@@ -4443,7 +4442,7 @@ class OrderService:
                             unit_price=float(item.unit_price or 0),
                         )
                         for item in (order.items or [])
-                        if not getattr(item, 'is_deleted', False)
+                        if not getattr(item, "is_deleted", False)
                     ],
                 }
 
@@ -4636,7 +4635,9 @@ class OrderService:
                         "zone": order.zone,
                         # Pickup
                         "pickup_location_code": order.pickup_location_code,
-                        "pickup_location": serialize_pickup_location(order.pickup_location),
+                        "pickup_location": serialize_pickup_location(
+                            order.pickup_location
+                        ),
                         # Dates
                         "booking_date": order.booking_date,
                         "delivered_date": order.delivered_date,
@@ -4652,7 +4653,7 @@ class OrderService:
                                 unit_price=float(item.unit_price or 0),
                             )
                             for item in (order.items or [])
-                            if not getattr(item, 'is_deleted', False)
+                            if not getattr(item, "is_deleted", False)
                         ],
                     }
                     previous_orders_response.append(Order_Response_Model(**order_dict))
@@ -4712,16 +4713,13 @@ class OrderService:
 
         try:
 
-            print("inside")
-
             db = get_db_session()
 
             company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
 
-            print(phone)
-
-            # query the db for fetching the orders
+            # query the db for fetching the latest 5 orders with distinct addresses
+            # Using DISTINCT ON with matching ORDER BY expression
 
             customers = (
                 db.query(Order)
@@ -4731,12 +4729,10 @@ class OrderService:
                     Order.consignee_phone == phone,
                 )
                 .distinct(Order.consignee_address)
+                .order_by( asc(Order.consignee_address), desc(Order.created_at))
+                .limit(3)
                 .all()
             )
-
-            print(customers)
-
-            # applying company and client filter
 
             customer_data = [
                 customerResponseModel(
@@ -6111,7 +6107,8 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         # Order.company_id == str(request["com_id"]),  # REMOVED - company_id no longer exists
-                        Order.order_id == str(request["id"]),
+                        Order.order_id
+                        == str(request["id"]),
                     )
                     .first()
                 )
