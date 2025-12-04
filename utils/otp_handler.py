@@ -766,11 +766,15 @@ class OTPHandler:
 
             if not otp_result.status:
                 return GenericResponseModel(
-                    status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                    status=False,
-                    message="Phone number updated but failed to send OTP. Please try resending.",
+                    status_code=http.HTTPStatus.OK,  # Changed from INTERNAL_SERVER_ERROR
+                    status=True,  # Changed from False
+                    message="Phone number updated successfully, but OTP sending failed. Please click 'Resend OTP'.",
+                    data={
+                        "new_phone": new_phone,
+                        "otp_sent": False,  # Indicate OTP wasn't sent
+                        "warning": "otp_send_failed",
+                    },
                 )
-
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 status=True,
