@@ -24,6 +24,9 @@ from .byoc_schema import (
     courier_Status,
     GetSingleContract,
     SingleRateUploadModel,
+    BlockedPincodeRequest,
+    RemoveBlockedPincodeRequest,
+    GetBlockedPincodesRequest,
 )
 
 # creating a client router
@@ -120,4 +123,41 @@ async def upload_single_contract_rate(Single_rate_upload: SingleRateUploadModel)
     response: GenericResponseModel = ManageCourierForClient.single_contract_rate(
         Single_rate_upload
     )
+    return build_api_response(response)
+
+
+# ============================================
+# COURIER SETTINGS - PINCODE BLOCKING
+# ============================================
+
+@byoc_router.post(
+    "/byoc/courier-settings/blocked-pincodes",
+    status_code=http.HTTPStatus.OK,
+    response_model=GenericResponseModel,
+)
+async def get_blocked_pincodes(request: GetBlockedPincodesRequest):
+    """Get all blocked pincodes for a specific courier"""
+    response: GenericResponseModel = ManageCourierForClient.get_blocked_pincodes(request)
+    return build_api_response(response)
+
+
+@byoc_router.post(
+    "/byoc/courier-settings/block-pincodes",
+    status_code=http.HTTPStatus.OK,
+    response_model=GenericResponseModel,
+)
+async def add_blocked_pincodes(request: BlockedPincodeRequest):
+    """Add blocked pincodes for a specific courier"""
+    response: GenericResponseModel = ManageCourierForClient.add_blocked_pincodes(request)
+    return build_api_response(response)
+
+
+@byoc_router.post(
+    "/byoc/courier-settings/unblock-pincodes",
+    status_code=http.HTTPStatus.OK,
+    response_model=GenericResponseModel,
+)
+async def remove_blocked_pincodes(request: RemoveBlockedPincodeRequest):
+    """Remove blocked pincodes for a specific courier"""
+    response: GenericResponseModel = ManageCourierForClient.remove_blocked_pincodes(request)
     return build_api_response(response)

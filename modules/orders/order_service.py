@@ -19,7 +19,7 @@ import pandas as pd
 from fastapi import Response
 from psycopg2 import DatabaseError
 from datetime import datetime, timedelta, timezone, date
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.types import DateTime, String
 from typing import List
@@ -43,6 +43,7 @@ from .order_schema import (
     Order_create_request_model,
     Order_Response_Model,
     Single_Order_Response_Model,
+    OrderItemResponse,
     Order_filters,
     cloneOrderModel,
     customerResponseModel,
@@ -58,6 +59,7 @@ from shipping_partner.shiperfecto.status_mapping import status_mapping
 # models
 from models import (
     Order,
+    OrderItem,
     Pickup_Location,
     Pincode_Mapping,
     Company_To_Client_Contract,
@@ -100,6 +102,33 @@ class TempModel(BaseModel):
 def round_to_2_decimal_place(value):
     """Round a float to 2 decimal places."""
     return round(value, 2)
+
+
+def serialize_pickup_location(pickup_location):
+    """
+    Convert Pickup_Location SQLAlchemy model to a serializable dict.
+    Returns None if pickup_location is None.
+    """
+    if pickup_location is None:
+        return None
+    
+    return {
+        "location_code": pickup_location.location_code,
+        "location_name": pickup_location.location_name,
+        "contact_person_name": pickup_location.contact_person_name,
+        "contact_person_phone": pickup_location.contact_person_phone,
+        "contact_person_email": pickup_location.contact_person_email,
+        "alternate_phone": pickup_location.alternate_phone,
+        "address": pickup_location.address,
+        "landmark": pickup_location.landmark,
+        "pincode": pickup_location.pincode,
+        "city": pickup_location.city,
+        "state": pickup_location.state,
+        "country": pickup_location.country,
+        "location_type": pickup_location.location_type,
+        "active": pickup_location.active,
+        "is_default": pickup_location.is_default,
+    }
 
 
 def calculate_order_values(order_data):
@@ -330,7 +359,6 @@ class OrderService:
                 db.query(Order)
                 .filter(
                     Order.order_id == order_data.order_id,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                 )
                 .first()
@@ -648,7 +676,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_data.order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -912,7 +939,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -940,7 +966,6 @@ class OrderService:
                         db.query(Order)
                         .filter(
                             Order.order_id == order_data.order_id,
-                            Order.company_id == company_id,
                             Order.client_id == client_id,
                         )
                         .first()
@@ -1072,7 +1097,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -2849,7 +2873,6 @@ class OrderService:
                 db.query(Order)
                 .filter(
                     Order.order_id == order_id,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                 )
                 .first()
@@ -2878,7 +2901,6 @@ class OrderService:
                 db.query(Order)
                 .filter(
                     Order.order_id == new_order_id,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                 )
                 .first()
@@ -2955,7 +2977,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -3036,7 +3057,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -3191,7 +3211,6 @@ class OrderService:
                         db.query(Order.order_id)
                         .filter(
                             Order.order_id.in_(chunk_ids),
-                            Order.company_id == company_id,
                             Order.client_id == client_id,
                         )
                         .all()
@@ -4139,12 +4158,11 @@ class OrderService:
 
             db = get_db_session()
 
-            company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
 
             # Build base filters that apply to all queries
+            # Note: company_id removed from Order model - using client_id only
             base_filters = [
-                Order.company_id == company_id,
                 Order.client_id == client_id,
                 Order.is_deleted == False,
             ]
@@ -4186,9 +4204,6 @@ class OrderService:
                     ]
                 )
 
-            # Initialize sku_params for parameter binding
-            sku_params = {}
-
             # Remaining filters (applied to main query and count query)
             remaining_filters = []
 
@@ -4196,26 +4211,40 @@ class OrderService:
                 remaining_filters.append(Order.sub_status == current_status)
 
             if sku_codes:
-                sku_codes = [term.strip() for term in sku_codes.split(",")]
-                like_conditions = [
-                    text(
-                        f"EXISTS (SELECT 1 FROM jsonb_array_elements(products) AS elem WHERE elem->>'sku_code' ILIKE :sku_{i})"
-                    )
-                    for i, sku in enumerate(sku_codes)
+                sku_codes_list = [term.strip() for term in sku_codes.split(",")]
+                # Use EXISTS subquery to filter orders by SKU code in order_item table
+                sku_conditions = [
+                    OrderItem.sku_code.ilike(f"%{sku}%")
+                    for sku in sku_codes_list
                 ]
-                sku_filter = or_(*like_conditions)
-                remaining_filters.append(sku_filter)
-
-                # Store parameters for later use
-                sku_params = {f"sku_{i}": f"%{sku}%" for i, sku in enumerate(sku_codes)}
+                sku_exists = (
+                    db.query(OrderItem.id)
+                    .filter(
+                        OrderItem.order_id == Order.id,
+                        or_(*sku_conditions),
+                        OrderItem.is_deleted == False,
+                    )
+                    .exists()
+                )
+                remaining_filters.append(sku_exists)
 
             if product_name:
                 product_names = [term.strip() for term in product_name.split(",")]
-                name_filters = [
-                    cast(Order.products, String).ilike(f'%"name": "%{name.strip()}%"%')
+                # Use EXISTS subquery to filter orders by product name in order_item table
+                name_conditions = [
+                    OrderItem.name.ilike(f"%{name}%")
                     for name in product_names
                 ]
-                remaining_filters.append(or_(*name_filters))
+                name_exists = (
+                    db.query(OrderItem.id)
+                    .filter(
+                        OrderItem.order_id == Order.id,
+                        or_(*name_conditions),
+                        OrderItem.is_deleted == False,
+                    )
+                    .exists()
+                )
+                remaining_filters.append(name_exists)
 
             if pincode:
                 pincodes = [term.strip() for term in pincode.split(",")]
@@ -4237,11 +4266,22 @@ class OrderService:
                 remaining_filters.append(Order.courier_partner == courier_filter)
 
             if product_quantity:
-                remaining_filters.append(Order.product_quantity == product_quantity)
+                # Use scalar subquery to filter orders by total product quantity from order_item table
+                qty_scalar = (
+                    db.query(func.coalesce(func.sum(OrderItem.quantity), 0))
+                    .filter(
+                        OrderItem.order_id == Order.id,
+                        OrderItem.is_deleted == False,
+                    )
+                    .correlate(Order)
+                    .scalar_subquery()
+                )
+                remaining_filters.append(qty_scalar == product_quantity)
 
-            if tags and len(tags) > 0:
-                tag_filter = cast(Order.order_tags, String).ilike(f"%{tags.strip()}%")
-                remaining_filters.append(tag_filter)
+            # Note: order_tags filter temporarily disabled - tags moved to separate table
+            # if tags and len(tags) > 0:
+            #     tag_filter = cast(Order.order_tags, String).ilike(f"%{tags.strip()}%")
+            #     remaining_filters.append(tag_filter)
 
             # Repeat customer filter - if filter is on, only repeat customers, otherwise all
             if repeat_customer is True:
@@ -4249,7 +4289,6 @@ class OrderService:
                 repeat_customer_subquery = (
                     db.query(Order.consignee_phone)
                     .filter(
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                         Order.consignee_phone.isnot(None),
@@ -4273,12 +4312,7 @@ class OrderService:
             status_count_query = status_count_query.filter(*remaining_filters)
 
             # Get status counts optimized - count by status without loading data
-            status_count_query_final = status_count_query
-
-            if sku_codes:
-                status_count_query_final = status_count_query_final.params(**sku_params)
-
-            status_counts_result = status_count_query_final.group_by(Order.status).all()
+            status_counts_result = status_count_query.group_by(Order.status).all()
             status_counts = {status: count for status, count in status_counts_result}
 
             # Get total count for "all" status
@@ -4290,9 +4324,6 @@ class OrderService:
             main_query = main_query.filter(*base_filters)
             main_query = main_query.filter(*common_filters)
             main_query = main_query.filter(*remaining_filters)
-
-            if sku_codes:
-                main_query = main_query.params(**sku_params)
 
             # Apply status filter to main query only
             if order_status != "all":
@@ -4311,9 +4342,6 @@ class OrderService:
                 Order.courier_partner.isnot(None), Order.courier_partner != ""
             ).distinct()
 
-            if sku_codes:
-                courier_query = courier_query.params(**sku_params)
-
             distinct_courier_partners = [partner[0] for partner in courier_query.all()]
 
             # Get total count for pagination
@@ -4326,8 +4354,11 @@ class OrderService:
             offset_value = (page_number - 1) * batch_size
             main_query = main_query.offset(offset_value).limit(batch_size)
 
-            # Execute main query with joinedload for pickup_location
-            fetched_orders = main_query.options(joinedload(Order.pickup_location)).all()
+            # Execute main query with joinedload for pickup_location and selectinload for items
+            fetched_orders = main_query.options(
+                joinedload(Order.pickup_location),
+                selectinload(Order.items),
+            ).all()
 
             ####### REPEAT CUSTOMER LOGIC #######
 
@@ -4345,7 +4376,6 @@ class OrderService:
                     db.query(Order.consignee_phone, func.count(Order.id))
                     .filter(
                         Order.consignee_phone.in_(phone_numbers),
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                     )
@@ -4360,7 +4390,62 @@ class OrderService:
             # Convert orders to response format
             fetched_orders_response = []
             for order in fetched_orders:
-                order_dict = order.to_model().model_dump()
+                # Build response dict from order attributes
+                order_dict = {
+                    "id": order.id,
+                    "uuid": order.uuid,
+                    "order_id": order.order_id,
+                    "order_date": order.order_date,
+                    "channel": order.channel,
+                    "client_id": order.client_id,
+                    # Consignee
+                    "consignee_full_name": order.consignee_full_name,
+                    "consignee_phone": order.consignee_phone,
+                    "consignee_email": order.consignee_email,
+                    "consignee_address": order.consignee_address,
+                    "consignee_pincode": order.consignee_pincode,
+                    "consignee_city": order.consignee_city,
+                    "consignee_state": order.consignee_state,
+                    "consignee_country": order.consignee_country,
+                    # Payment
+                    "payment_mode": order.payment_mode,
+                    "total_amount": float(order.total_amount or 0),
+                    "order_value": float(order.order_value or 0),
+                    "cod_to_collect": float(order.cod_to_collect or 0),
+                    # Package
+                    "weight": float(order.weight or 0),
+                    "applicable_weight": float(order.applicable_weight or 0),
+                    "volumetric_weight": float(order.volumetric_weight or 0),
+                    "length": float(order.length or 0),
+                    "breadth": float(order.breadth or 0),
+                    "height": float(order.height or 0),
+                    # Shipment
+                    "status": order.status,
+                    "sub_status": order.sub_status,
+                    "awb_number": order.awb_number,
+                    "courier_partner": order.courier_partner,
+                    "zone": order.zone,
+                    # Pickup
+                    "pickup_location_code": order.pickup_location_code,
+                    "pickup_location": serialize_pickup_location(order.pickup_location),
+                    # Dates
+                    "booking_date": order.booking_date,
+                    "delivered_date": order.delivered_date,
+                    "edd": order.edd,
+                    "created_at": order.created_at,
+                    # Items - convert from relationship to response format
+                    "items": [
+                        OrderItemResponse(
+                            id=item.id,
+                            name=item.name,
+                            sku_code=item.sku_code,
+                            quantity=item.quantity,
+                            unit_price=float(item.unit_price or 0),
+                        )
+                        for item in (order.items or [])
+                        if not getattr(item, 'is_deleted', False)
+                    ],
+                }
 
                 # Get actual previous order count for this phone number
                 phone = order.consignee_phone
@@ -4424,7 +4509,6 @@ class OrderService:
         """
         try:
             with get_db_session() as db:
-                company_id = context_user_data.get().company_id
                 client_id = context_user_data.get().client_id
 
                 # First, get the current order to extract the phone number
@@ -4432,7 +4516,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                     )
@@ -4456,7 +4539,6 @@ class OrderService:
                 # Build base query for previous orders
                 base_query = db.query(Order).filter(
                     Order.consignee_phone == current_order.consignee_phone,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                     Order.is_deleted == False,
                     Order.order_id != order_id,  # Exclude current order
@@ -4467,7 +4549,6 @@ class OrderService:
                     db.query(Order.status, func.count(Order.id))
                     .filter(
                         Order.consignee_phone == current_order.consignee_phone,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                         Order.order_id != order_id,  # Exclude current order
@@ -4504,7 +4585,10 @@ class OrderService:
                 # Apply pagination and sorting
                 offset_value = (page_number - 1) * batch_size
                 previous_orders = (
-                    base_query.options(joinedload(Order.pickup_location))
+                    base_query.options(
+                        joinedload(Order.pickup_location),
+                        selectinload(Order.items),
+                    )
                     .order_by(
                         desc(Order.order_date), desc(Order.created_at), desc(Order.id)
                     )
@@ -4516,7 +4600,61 @@ class OrderService:
                 # Convert to response format
                 previous_orders_response = []
                 for order in previous_orders:
-                    order_dict = order.to_model().model_dump()
+                    order_dict = {
+                        "id": order.id,
+                        "uuid": order.uuid,
+                        "order_id": order.order_id,
+                        "order_date": order.order_date,
+                        "channel": order.channel,
+                        "client_id": order.client_id,
+                        # Consignee
+                        "consignee_full_name": order.consignee_full_name,
+                        "consignee_phone": order.consignee_phone,
+                        "consignee_email": order.consignee_email,
+                        "consignee_address": order.consignee_address,
+                        "consignee_pincode": order.consignee_pincode,
+                        "consignee_city": order.consignee_city,
+                        "consignee_state": order.consignee_state,
+                        "consignee_country": order.consignee_country,
+                        # Payment
+                        "payment_mode": order.payment_mode,
+                        "total_amount": float(order.total_amount or 0),
+                        "order_value": float(order.order_value or 0),
+                        "cod_to_collect": float(order.cod_to_collect or 0),
+                        # Package
+                        "weight": float(order.weight or 0),
+                        "applicable_weight": float(order.applicable_weight or 0),
+                        "volumetric_weight": float(order.volumetric_weight or 0),
+                        "length": float(order.length or 0),
+                        "breadth": float(order.breadth or 0),
+                        "height": float(order.height or 0),
+                        # Shipment
+                        "status": order.status,
+                        "sub_status": order.sub_status,
+                        "awb_number": order.awb_number,
+                        "courier_partner": order.courier_partner,
+                        "zone": order.zone,
+                        # Pickup
+                        "pickup_location_code": order.pickup_location_code,
+                        "pickup_location": serialize_pickup_location(order.pickup_location),
+                        # Dates
+                        "booking_date": order.booking_date,
+                        "delivered_date": order.delivered_date,
+                        "edd": order.edd,
+                        "created_at": order.created_at,
+                        # Items - convert from relationship to response format
+                        "items": [
+                            OrderItemResponse(
+                                id=item.id,
+                                name=item.name,
+                                sku_code=item.sku_code,
+                                quantity=item.quantity,
+                                unit_price=float(item.unit_price or 0),
+                            )
+                            for item in (order.items or [])
+                            if not getattr(item, 'is_deleted', False)
+                        ],
+                    }
                     previous_orders_response.append(Order_Response_Model(**order_dict))
 
                 # Calculate pagination info
@@ -4587,6 +4725,7 @@ class OrderService:
 
             customers = (
                 db.query(Order)
+                .options(selectinload(Order.items))
                 .filter(
                     Order.client_id == client_id,
                     Order.consignee_phone == phone,
@@ -4674,7 +4813,6 @@ class OrderService:
 
             else:
                 query = query.filter(
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                     Order.is_deleted == False,
                 )
@@ -5338,11 +5476,10 @@ class OrderService:
 
             # query the db for fetching the orders
 
-            query = db.query(Order)
+            query = db.query(Order).options(selectinload(Order.items))
 
             # # applying company and client filter
             fetched_orders = query.filter(
-                Order.company_id == company_id,
                 Order.client_id == client_id,
                 Order.cod_remittance_cycle_id == cycle_id,
             ).all()
@@ -5514,12 +5651,17 @@ class OrderService:
                 order_data = (
                     db.query(Order)
                     .filter(
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.order_id == order_id,
                         Order.is_deleted == False,
                     )
-                    .options(joinedload(Order.pickup_location))
+                    .options(
+                        joinedload(Order.pickup_location),
+                        selectinload(Order.items),
+                        selectinload(Order.tracking_events),
+                        selectinload(Order.audit_logs),
+                        joinedload(Order.billing),
+                    )
                     .first()
                 )
 
@@ -5712,7 +5854,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_data["order_id"],
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -5963,10 +6104,13 @@ class OrderService:
                     }
                 }
 
+                # TODO: This legacy WooCommerce integration needs to be updated
+                # to use client_id instead of company_id (which was removed from Order model)
+                # For now, this method is not functional
                 existing_order = (
                     db.query(Order)
                     .filter(
-                        Order.company_id == str(request["com_id"]),
+                        # Order.company_id == str(request["com_id"]),  # REMOVED - company_id no longer exists
                         Order.order_id == str(request["id"]),
                     )
                     .first()
@@ -6066,7 +6210,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id.in_(order_ids),
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.status == "new",
                     )
