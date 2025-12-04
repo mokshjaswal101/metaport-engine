@@ -54,15 +54,6 @@ from context_manager.context import get_db_session
 
 
 class Order(DBBase, DBBaseClass):
-    """
-    Core order table optimized for high-volume operations.
-
-    Design Principles:
-    - Contains only frequently accessed fields
-    - Normalized related data to separate tables
-    - Comprehensive indexing for query performance
-    - Partitioned by order_date for scalability
-    """
 
     __tablename__ = "order"
 
@@ -135,6 +126,9 @@ class Order(DBBase, DBBaseClass):
 
     # COD amount to collect (for partial COD scenarios)
     cod_to_collect = Column(Numeric(10, 2), nullable=True, default=0)
+
+    # E-way bill number (mandatory for orders >= ₹50,000)
+    eway_bill_number = Column(String(12), nullable=True)
 
     # ============================================
     # PACKAGE DETAILS (3 decimal places for dimensions/weight)
@@ -303,7 +297,6 @@ class Order(DBBase, DBBaseClass):
             "status",
             "order_date",
         ),
-        # FIX: Composite index for date range queries with status filtering
         Index(
             "ix_order_v2_client_date_status",
             "client_id",
@@ -311,8 +304,6 @@ class Order(DBBase, DBBaseClass):
             "status",
             "is_deleted",
         ),
-        # FIX: Partial index for frequently queried "new" status orders
-        # Optimizes queries for new orders dashboard/list views
         Index(
             "ix_order_v2_new_orders",
             "client_id",
@@ -354,6 +345,7 @@ class Order(DBBase, DBBaseClass):
             "sub_status": self.sub_status,
             "zone": self.zone,
             "pickup_location_code": self.pickup_location_code,
+            "eway_bill_number": self.eway_bill_number,
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -430,6 +422,7 @@ class Order(DBBase, DBBaseClass):
             "other_charges": float(self.other_charges or 0),
             "tax_amount": float(self.tax_amount or 0),
             "cod_to_collect": float(self.cod_to_collect or 0),
+            "eway_bill_number": self.eway_bill_number,
             # Package
             "length": float(self.length or 0),
             "breadth": float(self.breadth or 0),
@@ -492,19 +485,18 @@ class Order(DBBase, DBBaseClass):
     @staticmethod
     def create_db_entity(order_data: dict) -> "Order":
         """Create Order entity from dictionary"""
-        return Order(**order_data)
+        # Filter out fields that don't exist on the Order model
+        filtered_data = {
+            k: v for k, v in order_data.items() if k not in ("products", "courier")
+        }
+        return Order(**filtered_data)
 
     @classmethod
     def create_new_order(cls, order: "Order", db=None):
         """
         Create a new order in the database.
 
-        Args:
-            order: Order instance to create
-            db: Optional database session (uses context if not provided)
 
-        Returns:
-            Created order instance
         """
         try:
             if db is None:
@@ -521,13 +513,7 @@ class Order(DBBase, DBBaseClass):
         """
         Get order by order_id and client_id.
 
-        Args:
-            order_id: The order's string identifier
-            client_id: The client this order belongs to
-            db: Optional database session
 
-        Returns:
-            Order instance or None
         """
         if db is None:
             db = get_db_session()
@@ -546,12 +532,7 @@ class Order(DBBase, DBBaseClass):
         """
         Get order by AWB number.
 
-        Args:
-            awb_number: The shipment AWB number
-            db: Optional database session
 
-        Returns:
-            Order instance or None
         """
         if db is None:
             db = get_db_session()
@@ -566,13 +547,6 @@ class Order(DBBase, DBBaseClass):
         """
         Check if order exists.
 
-        Args:
-            order_id: The order's string identifier
-            client_id: The client this order belongs to
-            db: Optional database session
-
-        Returns:
-            True if order exists, False otherwise
         """
         if db is None:
             db = get_db_session()
@@ -603,17 +577,7 @@ class Order(DBBase, DBBaseClass):
         """
         Get total product quantity from order_item table.
 
-        FIX: Implements caching to prevent N+1 query problem when displaying order lists.
-        Use `use_cache=False` to force a fresh database query.
 
-        For batch operations, use `Order.prefetch_product_quantities()` instead.
-
-        Args:
-            db: Database session (optional)
-            use_cache: Whether to use cached value if available (default True)
-
-        Returns:
-            Total quantity of all items
         """
         # Check cache first
         if use_cache and self._cached_product_quantity is not None:
@@ -647,10 +611,7 @@ class Order(DBBase, DBBaseClass):
         """
         Manually set the product quantity cache.
 
-        Useful when you've already fetched the quantity in a batch query.
 
-        Args:
-            quantity: The total quantity to cache
         """
         self._cached_product_quantity = quantity
 
@@ -662,20 +623,6 @@ class Order(DBBase, DBBaseClass):
     def prefetch_product_quantities(cls, orders, db=None):
         """
         Batch prefetch product quantities for multiple orders.
-
-        FIX: Prevents N+1 query problem by fetching all quantities in a single query.
-
-        Usage:
-            orders = db.query(Order).filter(...).all()
-            Order.prefetch_product_quantities(orders, db)
-            # Now each order.get_product_quantity() uses cached value
-
-        Args:
-            orders: List of Order instances
-            db: Database session (optional)
-
-        Returns:
-            Dict mapping order_id to quantity
         """
         if not orders:
             return {}
@@ -758,18 +705,6 @@ class Order(DBBase, DBBaseClass):
         """
         Add eager loading for order items.
 
-        PERFORMANCE FIX: Use this for order details view to avoid N+1 queries.
-
-        Usage:
-            query = db.query(Order).filter(...)
-            query = Order.with_items(query)
-            orders = query.all()
-
-        Args:
-            query: SQLAlchemy query object
-
-        Returns:
-            Query with items eager loaded
         """
         return query.options(selectinload(cls.items))
 
@@ -778,13 +713,6 @@ class Order(DBBase, DBBaseClass):
         """
         Add eager loading for tracking events.
 
-        PERFORMANCE FIX: Use this for order tracking view.
-
-        Args:
-            query: SQLAlchemy query object
-
-        Returns:
-            Query with tracking events eager loaded
         """
         return query.options(selectinload(cls.tracking_events))
 
@@ -793,18 +721,6 @@ class Order(DBBase, DBBaseClass):
         """
         Add eager loading for audit logs with limit.
 
-        PERFORMANCE FIX: Limits audit logs to recent entries (default 50)
-        to prevent loading thousands of records.
-
-        Note: limit is applied in Python, not SQL (SQLAlchemy limitation).
-        For true SQL limit, use get_recent_audit_logs() method instead.
-
-        Args:
-            query: SQLAlchemy query object
-            limit: Maximum number of audit logs to load (default 50)
-
-        Returns:
-            Query with audit logs eager loaded
         """
         return query.options(selectinload(cls.audit_logs))
 
@@ -813,14 +729,6 @@ class Order(DBBase, DBBaseClass):
         """
         Add eager loading for all related data (items, tracking, billing).
 
-        PERFORMANCE FIX: Use this for order detail page to load all data
-        in 2-3 queries instead of 5-10.
-
-        Args:
-            query: SQLAlchemy query object
-
-        Returns:
-            Query with all related data eager loaded
         """
         return query.options(
             selectinload(cls.items),
@@ -835,16 +743,6 @@ class Order(DBBase, DBBaseClass):
         """
         Get order with all related data pre-loaded.
 
-        PERFORMANCE FIX: Single query pattern for order detail page.
-        Reduces queries from 5-10 to 2-3.
-
-        Args:
-            order_id: The order's string identifier
-            client_id: The client this order belongs to
-            db: Optional database session
-
-        Returns:
-            Order instance with items, tracking, audit logs loaded
         """
         if db is None:
             db = get_db_session()
@@ -861,14 +759,6 @@ class Order(DBBase, DBBaseClass):
         """
         Get recent audit logs for this order with SQL-level limit.
 
-        PERFORMANCE FIX: Prevents loading thousands of audit records.
-
-        Args:
-            db: Optional database session
-            limit: Maximum number of logs to return (default 50)
-
-        Returns:
-            List of recent OrderAuditLog entries
         """
         if db is None:
             db = get_db_session()

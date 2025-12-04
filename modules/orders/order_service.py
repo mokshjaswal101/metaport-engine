@@ -344,740 +344,407 @@ class OrderService:
     def create_order(
         order_data: Order_create_request_model,
     ):
+        """
+        Create a new order with products stored in order_item table
+        and audit logging in order_audit_log table.
+        """
+        from models.order_item import OrderItem
+        from models.order_audit_log import OrderAuditLog
 
         try:
-            print(order_data, "before process")
-
-            courier_id = order_data.courier
-            del order_data.courier
-
             db = get_db_session()
 
-            company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
+            user_id = context_user_data.get().id
+            user_name = context_user_data.get().first_name
 
-            order = (
+            # Check if order_id already exists for this client
+            existing_order = (
                 db.query(Order)
                 .filter(
                     Order.order_id == order_data.order_id,
                     Order.client_id == client_id,
+                    Order.is_deleted == False,
                 )
                 .first()
             )
 
-            # Throw an error if an order id for that client already exists
-            if order:
-
-                if order.status != "new" and order.status != "cancelled":
-
-                    if client_id == 93:
-
-                        return GenericResponseModel(
-                            status_code=http.HTTPStatus.OK,
-                            status=True,
-                            data={
-                                "awb_number": order.awb_number or "",
-                                "delivery_partner": order.courier_partner or "",
-                            },
-                            message="AWB already assigned",
-                        )
-
-                    else:
-
-                        return GenericResponseModel(
-                            status_code=http.HTTPStatus.CONFLICT,
-                            status=False,
-                            data={
-                                "awb_number": order.awb_number or "",
-                                "delivery_partner": order.courier_partner or "",
-                            },
-                            message="AWB already assigned",
-                        )
-
-                if courier_id is not None and order.status == "new":
-                    shipmentResponse = ShipmentService.assign_awb(
-                        CreateShipmentModel(
-                            order_id=order_data.order_id,
-                            contract_id=courier_id,
-                        )
-                    )
-
-                    return shipmentResponse
-
+            if existing_order:
                 return GenericResponseModel(
-                    status_code=http.HTTPStatus.CONFLICT,
+                    status_code=http.HTTPStatus.BAD_REQUEST,
                     data={"order_id": order_data.order_id},
-                    message="Order Id already exists",
+                    message="Order ID already exists",
                 )
 
-            order_data = order_data.model_dump()
+            # Extract products before converting to dict
+            products = order_data.products or []
+            order_dict = order_data.model_dump(exclude={"products"})
 
-            # Add company and client id to the order
+            # Add client id
+            order_dict["client_id"] = client_id
 
-            order_data["client_id"] = client_id
-            order_data["company_id"] = company_id
+            # Calculate order_value from products
+            order_value = (
+                sum(
+                    float(
+                        p.unit_price
+                        if hasattr(p, "unit_price")
+                        else p.get("unit_price", 0)
+                    )
+                    * int(
+                        p.quantity if hasattr(p, "quantity") else p.get("quantity", 1)
+                    )
+                    for p in products
+                )
+                if products
+                else 0
+            )
 
-            # adding the extra default details to the order
+            # Calculate total_amount
+            total_amount = (
+                float(order_dict.get("shipping_charges") or 0)
+                + float(order_dict.get("cod_charges") or 0)
+                + float(order_dict.get("gift_wrap_charges") or 0)
+                + float(order_dict.get("other_charges") or 0)
+                + float(order_dict.get("tax_amount") or 0)
+                + order_value
+                - float(order_dict.get("discount") or 0)
+            )
 
-            order_data["order_type"] = "B2C"
+            order_dict["order_value"] = round(order_value, 2)
+            order_dict["total_amount"] = round(total_amount, 2)
 
-            # rounde the volumetric weight to 3 decimal places
+            # Calculate COD to collect for COD orders
+            if order_dict.get("payment_mode", "").upper() == "COD":
+                order_dict["cod_to_collect"] = order_dict["total_amount"]
+            else:
+                order_dict["cod_to_collect"] = 0
+
+            # Calculate volumetric and applicable weight
             volumetric_weight = round(
-                (order_data["length"] * order_data["breadth"] * order_data["height"])
+                (order_dict["length"] * order_dict["breadth"] * order_dict["height"])
                 / 5000,
                 3,
             )
+            applicable_weight = round(max(order_dict["weight"], volumetric_weight), 3)
 
-            applicable_weight = round(max(order_data["weight"], volumetric_weight), 3)
+            order_dict["applicable_weight"] = applicable_weight
+            order_dict["volumetric_weight"] = volumetric_weight
 
-            order_data["applicable_weight"] = applicable_weight
-            order_data["volumetric_weight"] = volumetric_weight
+            # Set initial status
+            order_dict["status"] = "new"
+            order_dict["sub_status"] = "new"
 
-            order_data["status"] = "new"
-            order_data["sub_status"] = "new"
-
-            order_data["action_history"] = [
-                {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "message": "Order Created on Platform",
-                    "user_data": context_user_data.get().id,
-                }
-            ]
-
-            # Convert to UTC
-            order_data["order_date"] = convert_to_utc(
-                order_date=order_data["order_date"]
+            # Convert order_date to UTC
+            order_dict["order_date"] = convert_to_utc(
+                order_date=order_dict["order_date"]
             )
 
-            # calc product quantity
-            order_data["product_quantity"] = sum(
-                product["quantity"] for product in order_data["products"]
-            )
-
-            # fetch the pickup location pincode
-            pickup_pincode: int = (
+            # Fetch the pickup location pincode
+            pickup_result = (
                 db.query(Pickup_Location.pincode)
                 .filter(
-                    Pickup_Location.location_code == order_data["pickup_location_code"],
+                    Pickup_Location.location_code == order_dict["pickup_location_code"],
                     Pickup_Location.client_id == client_id,
+                    Pickup_Location.is_deleted == False,
                 )
                 .first()
-            )[0]
+            )
 
-            if pickup_pincode is None:
+            if pickup_result is None:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message="Invalid Pickup Location",
                 )
 
-            blocked_pickup_pincodes = [
-                "110018",
-                "110031",
-                "110041",
-                "110033",
-                "110043",
-                "110018",
-            ]
+            pickup_pincode = pickup_result[0]
 
-            if client_id == 93 and pickup_pincode in blocked_pickup_pincodes:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message="Pickup location not servicable",
-                )
-
-            # calculating shipping zone for the order
+            # Calculate shipping zone
             zone_data = ShipmentService.calculate_shipping_zone(
-                pickup_pincode, order_data["consignee_pincode"]
+                pickup_pincode, order_dict["consignee_pincode"]
             )
 
-            # return error message if could not calculate zone
             if not zone_data.status:
-                GenericResponseModel(
+                return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message="Invalid Pincodes",
                     status=False,
                 )
 
-            zone = zone_data.data["zone"]
-            order_data["zone"] = zone
+            order_dict["zone"] = zone_data.data["zone"]
 
-            order_model_instance = Order.create_db_entity(order_data)
+            # Create order entity
+            order_model_instance = Order.create_db_entity(order_dict)
+            db.add(order_model_instance)
+            db.flush()  # Get the order ID without committing
 
-            created_order = Order.create_new_order(order_model_instance)
+            # Create order items from products
+            if products:
+                order_items = OrderItem.bulk_create_from_products(
+                    order_id=order_model_instance.id,
+                    products=[
+                        p.model_dump() if hasattr(p, "model_dump") else p
+                        for p in products
+                    ],
+                )
+                db.add_all(order_items)
 
+            # Create audit log entry
+            audit_log = OrderAuditLog.log_order_created(
+                order_id=order_model_instance.id,
+                user_id=user_id,
+                user_name=user_name,
+                source="platform",
+            )
+            db.add(audit_log)
+
+            # Commit all changes
             db.commit()
-            print(courier_id, "**courier_id**")
-            if courier_id is not None:
-                shipmentResponse = ShipmentService.assign_awb(
-                    CreateShipmentModel(
-                        order_id=order_data["order_id"],
-                        contract_id=courier_id,
-                    )
-                )
-                print("inside shipment response", shipmentResponse)
-                db.commit()
-                return shipmentResponse
-            else:
-                # logger.info(">START COURIER WITH COURIER PRIORITY>")
-                # START COURIER PRIORITY FEATURE
-                result_config_setting = (
-                    db.query(
-                        Courier_Priority_Config_Setting.courier_method,
-                    )
-                    .filter(
-                        Courier_Priority_Config_Setting.client_id == client_id,
-                        Courier_Priority_Config_Setting.company_id == company_id,
-                        Courier_Priority_Config_Setting.status == True,
-                    )
-                    .first()
-                )
-                if result_config_setting:
-                    courier_method = result_config_setting[0]
-                    print(courier_method, "<<courier_method>>")
-                    if courier_method == "courier_assign_rules":
-                        # logger.info(
-                        #     f"I am {courier_method} Enabled for this order_id => {order_data["order_id"]}"
-                        # )
-                        courier_priority_rules = (
-                            db.query(Courier_Priority_Rules)
-                            .filter(
-                                and_(
-                                    Courier_Priority_Rules.status == True,
-                                    Courier_Priority_Rules.client_id == client_id,
-                                )
-                            )
-                            .order_by(Courier_Priority_Rules.ordering_key.asc())
-                            .all()
-                        )
-
-                        if (
-                            len(courier_priority_rules) > 0
-                            and courier_priority_rules != None
-                        ):
-                            print("I AM UNDER APPLU RULES FETCH DATA")
-                            list_Section = ShipmentService.apply_rules_and_fetch_data(
-                                courier_priority_rules,
-                                order_data["order_id"],
-                                db,
-                            )
-                            print(list_Section, "|>*|list_Section|<*|")
-                            if len(list_Section) > 0:
-                                return list_Section[0]
-                            else:
-                                print("NO Order Shipped With Courier Assing ")
-
-                            # logger.info(
-                            #     f"There are No Rule Available for this order_id => {order_data["order_id"]}"
-                            # )
-
-                    if courier_method == "courier_priority":
-                        # logger.info(
-                        #      f"I am {courier_method} Enabled for this order_id => {order_data["order_id"]}"
-                        # )
-                        courier_priority = (
-                            db.query(Courier_Priority.priority_type)
-                            .filter(Courier_Priority.client_id == client_id)
-                            .first()
-                        )
-                        # logger.info(
-                        #     f"Courier Priority NEW ACTION {format(str(courier_priority))}"
-                        # )
-                        if courier_priority != None:
-                            assign_priority_wise_courier = (
-                                ShipmentService.assign_priority_wise_courier(
-                                    courier_priority[0], order_data["order_id"]
-                                )
-                            )
-                            print(
-                                jsonable_encoder(assign_priority_wise_courier),
-                                ">**FINAL ACTION TRIGGER**< I AM ORDER SERVICE FILE",
-                            )
-                            if (
-                                len(assign_priority_wise_courier) > 0
-                                and assign_priority_wise_courier != None
-                            ):
-                                print(
-                                    "Successfull assign AWB=>",
-                                    assign_priority_wise_courier,
-                                )
-                                return assign_priority_wise_courier[0]
-                            else:
-                                # Return error response
-                                return GenericResponseModel(
-                                    status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                                    message="An error occurred while creating the Order.",
-                                )
-                        else:
-                            # logger.info(
-                            #     f"There are No Courier Priority Selected order_id => {order_data["order_id"]}"
-                            # )
-                            return GenericResponseModel(
-                                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                                message="An error occurred while creating the Order.",
-                            )
-                else:
-                    # logger.info(">>** Courier-Allocation Feature IS DISABLED **<<")
-                    print(">>** Courier-Allocation Feature IS DISABLED **<<")
-
-            # IF CLIENT HAS ADDED CUSTOM PERIORITY
 
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 message="Order created Successfully",
-                data={"order_id": created_order.order_id},
+                data={"order_id": order_model_instance.order_id},
                 status=True,
             )
 
         except DatabaseError as e:
-            # Log database error
+            db.rollback()
             logger.error(
                 extra=context_user_data.get(),
                 msg="Error creating Order: {}".format(str(e)),
             )
-
-            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An error occurred while creating the Order.",
             )
 
         except Exception as e:
-            # Log other unhandled exceptions
+            db.rollback()
             logger.error(
                 extra=context_user_data.get(),
                 msg="Unhandled error: {}".format(str(e)),
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
             )
 
-        finally:
-            if db:
-                db.close()
-
     @staticmethod
-    def dev_create_order(
-        order_data: Order_create_request_model,
-    ):
+    def update_order(order_id: str, order_data: Order_create_request_model):
+        """
+        Update an existing order. Only orders with status 'new' can be updated.
+        Products are updated in order_item table, audit log in order_audit_log table.
+        """
+        from models.order_item import OrderItem
+        from models.order_audit_log import OrderAuditLog
 
-        print("developement")
         try:
-            print(order_data)
-            courier_id = order_data.courier
-            del order_data.courier
+            db = get_db_session()
 
-            with get_db_session() as db:
+            client_id = context_user_data.get().client_id
+            user_id = context_user_data.get().id
+            user_name = context_user_data.get().name
 
-                company_id = context_user_data.get().company_id
-                client_id = context_user_data.get().client_id
+            # Find the existing order
+            order = (
+                db.query(Order)
+                .filter(
+                    Order.order_id == order_id,
+                    Order.client_id == client_id,
+                    Order.is_deleted == False,
+                )
+                .first()
+            )
 
-                order = (
+            if order is None:
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    data={"order_id": order_data.order_id},
+                    message="Order does not exist",
+                )
+
+            if order.status != "new":
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    message="Order already processed, cannot be updated",
+                )
+
+            # Check if order_id is being changed and new one already exists
+            if order_id != order_data.order_id:
+                check_existing_order = (
                     db.query(Order)
                     .filter(
                         Order.order_id == order_data.order_id,
                         Order.client_id == client_id,
+                        Order.is_deleted == False,
                     )
                     .first()
                 )
 
-                # Throw an error if an order id for that client already exists
-                if order:
-
-                    if order.status != "new" and order.status != "cancelled":
-
-                        if client_id == 93:
-
-                            return GenericResponseModel(
-                                status_code=http.HTTPStatus.OK,
-                                status=False,
-                                data={
-                                    "awb_number": order.awb_number or "",
-                                    "delivery_partner": order.courier_partner or "",
-                                },
-                                message="AWB already assigned",
-                            )
-
-                        else:
-
-                            return GenericResponseModel(
-                                status_code=http.HTTPStatus.CONFLICT,
-                                status=False,
-                                data={
-                                    "awb_number": order.awb_number or "",
-                                    "delivery_partner": order.courier_partner or "",
-                                },
-                                message="AWB already assigned",
-                            )
-
-                    if courier_id is not None and order.status == "new":
-                        shipmentResponse = ShipmentService.dev_assign_awb(
-                            order=order,
-                            courier_id=courier_id,
-                        )
-
-                        return shipmentResponse
-
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.CONFLICT,
-                        data={"order_id": order_data.order_id},
-                        message="Order Id already exists",
-                    )
-
-                order_data = order_data.model_dump()
-
-                if not re.search(
-                    r"\d", order_data["consignee_address"]
-                ):  # Check if there's at least one digit
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Consignee address must contain a house number or street number",
-                    )
-
-                # Add company and client id to the order
-
-                order_data["client_id"] = client_id
-                order_data["company_id"] = company_id
-
-                # adding the extra default details to the order
-
-                order_data["order_type"] = "B2C"
-
-                # rounde the volumetric weight to 3 decimal places
-                volumetric_weight = round(
-                    (
-                        order_data["length"]
-                        * order_data["breadth"]
-                        * order_data["height"]
-                    )
-                    / 5000,
-                    3,
-                )
-
-                applicable_weight = round(
-                    max(order_data["weight"], volumetric_weight), 3
-                )
-
-                order_data["applicable_weight"] = applicable_weight
-                order_data["volumetric_weight"] = volumetric_weight
-
-                order_data["status"] = "new"
-                order_data["sub_status"] = "new"
-
-                order_data["action_history"] = [
-                    {
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "message": "Order Created on Platform",
-                        "user_data": context_user_data.get().id,
-                    }
-                ]
-
-                # Convert to UTC
-                order_data["order_date"] = convert_to_utc(
-                    order_date=order_data["order_date"]
-                )
-
-                # calc product quantity
-                order_data["product_quantity"] = sum(
-                    product["quantity"] for product in order_data["products"]
-                )
-
-                pickup_location = (
-                    db.query(Pickup_Location.pincode)
-                    .filter(
-                        Pickup_Location.location_code
-                        == order_data["pickup_location_code"],
-                        Pickup_Location.client_id == client_id,
-                    )
-                    .first()
-                )
-
-                if not pickup_location:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pickup Location",
-                    )
-
-                # fetch the pickup location pincode
-                pickup_pincode = pickup_location.pincode
-
-                if pickup_pincode is None:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pickup Location",
-                    )
-
-                # calculating shipping zone for the order
-                zone_data = ShipmentService.calculate_shipping_zone(
-                    pickup_pincode, order_data["consignee_pincode"]
-                )
-
-                # return error message if could not calculate zone
-                if not zone_data.status:
-                    GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pincodes",
-                        status=False,
-                    )
-
-                zone = zone_data.data["zone"]
-                order_data["zone"] = zone
-
-                order_model_instance = Order.create_db_entity(order_data)
-
-                if courier_id == "1056" or courier_id == 1056:
-
-                    awb = (
-                        f"SITP0000{uuid4().int % 1000000:06d}"
-                        if order_data["payment_mode"].lower() == "prepaid"
-                        else f"C0000{uuid4().int % 1000000:06d}"
-                    )
-
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={
-                            "awb_number": awb or "",
-                            "delivery_partner": "Ekart 2 Kg" or "",
-                        },
-                        message="AWB assigned",
-                    )
-
-                if courier_id == "4057" or courier_id == 4057:
-
-                    prefix = random.choice([17, 18])
-                    suffix = uuid4().int % 10**8
-                    awb = f"SF{prefix}{suffix:08d}WAO"
-
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={
-                            "awb_number": awb or "",
-                            "delivery_partner": "Shadowfax" or "",
-                        },
-                        message="AWB assigned",
-                    )
-
-                else:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        status=False,
-                        message="Invalid Courier Id",
-                    )
-
-                if courier_id is not None:
-                    shipmentResponse = ShipmentService.dev_assign_awb(
-                        order=created_order,
-                        courier_id=courier_id,
-                    )
-
-                    print("inside shipment response", shipmentResponse)
-
-                    # db.commit()
-
-                    return shipmentResponse
-
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.OK,
-                    message="Order created Successfully",
-                    data={"order_id": created_order.order_id},
-                    status=True,
-                )
-
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error creating Order: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while creating the Order.",
-            )
-
-        except Exception as e:
-            # Log other unhandled exceptions
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
-            )
-            # Return a general internal server error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
-            )
-
-        finally:
-            if db:
-                db.close()
-
-    @staticmethod
-    def dev_cancel_awbs():
-
-        time.sleep(3)
-        return GenericResponseModel(
-            status=True,
-            status_code=http.HTTPStatus.OK,
-            message="cancelled successfully",
-        )
-
-    @staticmethod
-    def update_order(order_id: str, order_data: Order_create_request_model):
-
-        try:
-
-            with get_db_session() as db:
-
-                company_id = context_user_data.get().company_id
-                client_id = context_user_data.get().client_id
-
-                # Find the existing order from the db
-                order = (
-                    db.query(Order)
-                    .filter(
-                        Order.order_id == order_id,
-                        Order.client_id == client_id,
-                    )
-                    .first()
-                )
-
-                # if order not found, throw an error
-                if order is None:
+                if check_existing_order:
                     return GenericResponseModel(
                         status_code=http.HTTPStatus.BAD_REQUEST,
                         data={"order_id": order_data.order_id},
-                        message="Order does not exist",
+                        message="This order id already exists for another order",
                     )
 
-                if order.status != "new":
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Order cannot be updated",
+            # Extract products before converting to dict
+            products = order_data.products or []
+            order_dict = order_data.model_dump(exclude={"products"})
+
+            # Calculate order_value from products
+            order_value = (
+                sum(
+                    float(
+                        p.unit_price
+                        if hasattr(p, "unit_price")
+                        else p.get("unit_price", 0)
                     )
-
-                # check if the new order id is already present or not
-
-                if order_id != order_data.order_id:
-
-                    check_existing_order = (
-                        db.query(Order)
-                        .filter(
-                            Order.order_id == order_data.order_id,
-                            Order.client_id == client_id,
-                        )
-                        .first()
+                    * int(
+                        p.quantity if hasattr(p, "quantity") else p.get("quantity", 1)
                     )
+                    for p in products
+                )
+                if products
+                else 0
+            )
 
-                    # if order not found, throw an error
-                    if check_existing_order:
-                        return GenericResponseModel(
-                            status_code=http.HTTPStatus.BAD_REQUEST,
-                            data={"order_id": order_data.order_id},
-                            message="Order id cannot be updates as order id already exists",
-                        )
+            # Calculate total_amount
+            total_amount = (
+                float(order_dict.get("shipping_charges") or 0)
+                + float(order_dict.get("cod_charges") or 0)
+                + float(order_dict.get("gift_wrap_charges") or 0)
+                + float(order_dict.get("other_charges") or 0)
+                + float(order_dict.get("tax_amount") or 0)
+                + order_value
+                - float(order_dict.get("discount") or 0)
+            )
 
-                order_data = order_data.model_dump()
+            order_dict["order_value"] = round(order_value, 2)
+            order_dict["total_amount"] = round(total_amount, 2)
 
-                # Process and update all the fields in the order with the new data
-                for key, value in order_data.items():
+            # Calculate COD to collect for COD orders
+            if order_dict.get("payment_mode", "").upper() == "COD":
+                order_dict["cod_to_collect"] = order_dict["total_amount"]
+            else:
+                order_dict["cod_to_collect"] = 0
+
+            # Fields that should not be updated directly
+            exclude_fields = {
+                "client_id",
+                "status",
+                "sub_status",
+                "zone",
+                "applicable_weight",
+                "volumetric_weight",
+            }
+
+            # Update order fields
+            for key, value in order_dict.items():
+                if key not in exclude_fields and hasattr(order, key):
                     setattr(order, key, value)
 
-                # round the volumetric weight to 3 decimal places
-                volumetric_weight = round(
-                    (
-                        order_data["length"]
-                        * order_data["breadth"]
-                        * order_data["height"]
-                    )
-                    / 5000,
-                    3,
+            # Calculate volumetric and applicable weight
+            volumetric_weight = round(
+                (order_dict["length"] * order_dict["breadth"] * order_dict["height"])
+                / 5000,
+                3,
+            )
+            applicable_weight = round(max(order_dict["weight"], volumetric_weight), 3)
+
+            order.applicable_weight = applicable_weight
+            order.volumetric_weight = volumetric_weight
+
+            # Convert order_date to UTC
+            order.order_date = convert_to_utc(order_date=order.order_date)
+
+            # Fetch the pickup location pincode
+            pickup_result = (
+                db.query(Pickup_Location.pincode)
+                .filter(
+                    Pickup_Location.location_code == order_dict["pickup_location_code"],
+                    Pickup_Location.client_id == client_id,
+                    Pickup_Location.is_deleted == False,
                 )
-
-                applicable_weight = round(
-                    max(order_data["weight"], volumetric_weight), 3
-                )
-
-                order.applicable_weight = applicable_weight
-                order.volumetric_weight = volumetric_weight
-
-                # Convert to UTC
-                order.order_date = convert_to_utc(order_date=order.order_date)
-
-                new_activity = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "message": "Order Updated on Platform",
-                    "user_data": context_user_data.get().id,
-                }
-                order.action_history.append(new_activity)
-
-                # fetch the pickup location pincode
-                pickup_pincode: int = (
-                    db.query(Pickup_Location.pincode)
-                    .filter(
-                        Pickup_Location.location_code
-                        == order_data["pickup_location_code"]
-                    )
-                    .first()
-                )[0]
-
-                if pickup_pincode is None:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pickup Location",
-                    )
-
-                # calculating shipping zone for the order
-                zone_data = ShipmentService.calculate_shipping_zone(
-                    pickup_pincode, order_data["consignee_pincode"]
-                )
-
-                # return error message if could not calculate zone
-                if not zone_data.status:
-                    GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pincodes",
-                        status=False,
-                    )
-
-                zone = zone_data.data.get("zone", "E")
-                order.zone = zone
-
-                order.sub_status = "new"
-
-                # Commit the updated order to the database
-                db.add(order)
-                db.commit()
-
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.OK,
-                    message="Order updated Successfully",
-                    status=True,
-                )
-
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error creating Order: {}".format(str(e)),
+                .first()
             )
 
-            # Return error response
+            if pickup_result is None:
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    message="Invalid Pickup Location",
+                )
+
+            pickup_pincode = pickup_result[0]
+
+            # Calculate shipping zone
+            zone_data = ShipmentService.calculate_shipping_zone(
+                pickup_pincode, order_dict["consignee_pincode"]
+            )
+
+            if not zone_data.status:
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    message="Invalid Pincodes",
+                    status=False,
+                )
+
+            order.zone = zone_data.data.get("zone", "E")
+            order.sub_status = "new"
+
+            # Update products: soft delete old items and create new ones
+            if products:
+                # Soft delete existing items
+                db.query(OrderItem).filter(
+                    OrderItem.order_id == order.id,
+                    OrderItem.is_deleted == False,
+                ).update({"is_deleted": True})
+
+                # Create new items
+                order_items = OrderItem.bulk_create_from_products(
+                    order_id=order.id,
+                    products=[
+                        p.model_dump() if hasattr(p, "model_dump") else p
+                        for p in products
+                    ],
+                )
+                db.add_all(order_items)
+
+            # Create audit log entry
+            audit_log = OrderAuditLog.log_order_updated(
+                order_id=order.id,
+                user_id=user_id,
+                user_name=user_name,
+            )
+            db.add(audit_log)
+
+            # Commit all changes
+            db.commit()
+
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.OK,
+                message="Order updated Successfully",
+                status=True,
+            )
+
+        except DatabaseError as e:
+            db.rollback()
+            logger.error(
+                extra=context_user_data.get(),
+                msg="Error updating Order: {}".format(str(e)),
+            )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while creating the Order.",
+                message="An error occurred while updating the Order.",
             )
 
         except Exception as e:
-            # Log other unhandled exceptions
+            db.rollback()
             logger.error(
                 extra=context_user_data.get(),
                 msg="Unhandled error: {}".format(str(e)),
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
@@ -2913,23 +2580,81 @@ class OrderService:
                     message="Duplicate order ID generated. Please try again.",
                 )
 
+            from models.order_item import OrderItem
+            from models.order_audit_log import OrderAuditLog
+
+            user_id = context_user_data.get().id
+            user_name = context_user_data.get().name
+
             order_dict = order.__dict__.copy()
 
+            # Remove SQLAlchemy internal state and fields that shouldn't be copied
+            order_dict.pop("_sa_instance_state", None)
+            order_dict.pop("id", None)
+            order_dict.pop("uuid", None)
+            order_dict.pop("created_at", None)
+            order_dict.pop("updated_at", None)
+
             validated_order_data = cloneOrderModel(**order_dict)
-            # Remove courier field if it exists to avoid conflicts
+            # Remove fields that don't exist on Order model
             validated_data_dict = validated_order_data.model_dump()
-            if "courier" in validated_data_dict:
-                del validated_data_dict["courier"]
+            validated_data_dict.pop("products", None)
+            validated_data_dict.pop("courier", None)
+
             cloned_order = Order(**validated_data_dict)
 
             cloned_order.order_id = new_order_id
             cloned_order.status = "new"
             cloned_order.sub_status = "new"
-            cloned_order.tracking_info = []
-            cloned_order.action_history = []
+
+            # Clear shipment-related fields
+            cloned_order.awb_number = None
+            cloned_order.courier_partner = None
+            cloned_order.aggregator = None
+            cloned_order.shipping_partner_order_id = None
+            cloned_order.shipping_partner_shipping_id = None
+            cloned_order.label_url = None
+            cloned_order.manifest_url = None
+            cloned_order.invoice_url = None
+            cloned_order.is_label_generated = False
 
             # Add the cloned order to the database
             db.add(cloned_order)
+            db.flush()  # Get the ID
+
+            # Clone order items from original order
+            original_items = (
+                db.query(OrderItem)
+                .filter(
+                    OrderItem.order_id == order.id,
+                    OrderItem.is_deleted == False,
+                )
+                .all()
+            )
+
+            if original_items:
+                cloned_items = []
+                for item in original_items:
+                    cloned_item = OrderItem(
+                        order_id=cloned_order.id,
+                        name=item.name,
+                        sku_code=item.sku_code,
+                        quantity=item.quantity,
+                        unit_price=item.unit_price,
+                        product_id=item.product_id,
+                    )
+                    cloned_items.append(cloned_item)
+                db.add_all(cloned_items)
+
+            # Create audit log entry
+            audit_log = OrderAuditLog.log_order_cloned(
+                order_id=cloned_order.id,
+                source_order_id=order_id,
+                user_id=user_id,
+                user_name=user_name,
+            )
+            db.add(audit_log)
+
             db.commit()
 
             return GenericResponseModel(
@@ -2966,12 +2691,15 @@ class OrderService:
 
     @staticmethod
     def cancel_order(order_id: str):
+        """Cancel an order. Only orders with status 'new' can be cancelled."""
+        from models.order_audit_log import OrderAuditLog
 
         try:
             with get_db_session() as db:
 
-                company_id = context_user_data.get().company_id
                 client_id = context_user_data.get().client_id
+                user_id = context_user_data.get().id
+                user_name = context_user_data.get().name
 
                 # Find the existing order from the db
                 order = (
@@ -2979,6 +2707,7 @@ class OrderService:
                     .filter(
                         Order.order_id == order_id,
                         Order.client_id == client_id,
+                        Order.is_deleted == False,
                     )
                     .first()
                 )
@@ -2999,6 +2728,15 @@ class OrderService:
                 # update the status
                 order.status = "cancelled"
                 order.sub_status = "cancelled"
+                order.cancel_count = (order.cancel_count or 0) + 1
+
+                # Create audit log entry
+                audit_log = OrderAuditLog.log_order_cancelled(
+                    order_id=order.id,
+                    user_id=user_id,
+                    user_name=user_name,
+                )
+                db.add(audit_log)
 
                 # Commit the updated order to the database
                 db.add(order)
@@ -3289,18 +3027,9 @@ class OrderService:
             # Pre-compile validation constants
             VALIDATION_CONSTANTS = {
                 "client_id": client_id,
-                "company_id": company_id,
-                "order_type": "B2C",
                 "status": "new",
                 "sub_status": "new",
                 "current_timestamp": current_timestamp,
-                "action_history": [
-                    {
-                        "timestamp": current_timestamp,
-                        "message": "Order Created on Platform",
-                        "user_data": "",
-                    }
-                ],
             }  # Progress tracking for validation
             orders_processed = 0
             validation_errors_count = 0
@@ -3346,7 +3075,6 @@ class OrderService:
                         "payment_mode",
                         "total_amount",
                         "order_value",
-                        "products",
                         "length",
                         "breadth",
                         "height",
@@ -3475,25 +3203,13 @@ class OrderService:
                         )
                         continue
 
-                    # OPTIMIZATION 8: Fast product quantity calculation
-                    try:
-                        products = order_dict.get("products", [])
-                        product_quantity = (
-                            sum(p.get("quantity", 0) for p in products)
-                            if products
-                            else 1
-                        )
-                    except (TypeError, AttributeError):
-                        product_quantity = 1
-
-                    # OPTIMIZATION 9: Bulk update with pre-computed constants
+                    # OPTIMIZATION 8: Bulk update with pre-computed constants
                     order_dict.update(VALIDATION_CONSTANTS)
                     order_dict.update(
                         {
                             "zone": zone,
                             "applicable_weight": applicable_weight,
                             "volumetric_weight": volumetric_weight,
-                            "product_quantity": product_quantity,
                         }
                     )
 
@@ -3572,13 +3288,6 @@ class OrderService:
                                 import json
                                 import uuid
 
-                                action_history_json = json.dumps(
-                                    order_dict.get("action_history", [])
-                                )
-                                order_tags_json = json.dumps(
-                                    order_dict.get("order_tags", [])
-                                )
-
                                 # Helper function to safely convert to float
                                 def safe_float(value, default=None):
                                     if value is None or value == "":
@@ -3597,32 +3306,6 @@ class OrderService:
                                     except (ValueError, TypeError):
                                         return default
 
-                                # Clean products: ensure numeric types for quantity and unit_price
-                                raw_products = order_dict.get("products", []) or []
-                                cleaned_products = []
-                                computed_product_quantity = 0
-                                for prod in raw_products:
-                                    try:
-                                        # Work on a shallow copy to avoid mutating input unexpectedly
-                                        p = dict(prod)
-                                        qty = safe_int(p.get("quantity"), 0)
-                                        price = safe_float(p.get("unit_price"), None)
-                                        p["quantity"] = qty
-                                        # Only set unit_price if it's present or convertible
-                                        if price is not None:
-                                            # Format to a float (keeps numeric type in JSON)
-                                            p["unit_price"] = price
-                                        else:
-                                            # Remove empty unit_price to avoid storing as empty string
-                                            p.pop("unit_price", None)
-                                        cleaned_products.append(p)
-                                        computed_product_quantity += qty
-                                    except Exception:
-                                        # Fallback: keep original product if cleaning fails for this item
-                                        cleaned_products.append(prod)
-
-                                products_json = json.dumps(cleaned_products)
-
                                 # Prepare the insert tuple with all required fields
                                 insert_values.append(
                                     (
@@ -3630,10 +3313,8 @@ class OrderService:
                                         uuid.uuid4(),  # uuid
                                         # Basic order info
                                         str(order_dict.get("order_id", "")),
-                                        str(order_dict.get("order_type", "B2C")),
                                         order_date_str,
                                         order_dict.get("channel"),
-                                        safe_int(order_dict.get("company_id")),
                                         safe_int(order_dict.get("client_id")),
                                         # Consignee details
                                         str(order_dict.get("consignee_full_name", "")),
@@ -3651,7 +3332,7 @@ class OrderService:
                                         # Billing details
                                         bool(
                                             order_dict.get(
-                                                "billing_is_same_as_consignee", True
+                                                "is_billing_same_as_consignee", True
                                             )
                                         ),
                                         order_dict.get("billing_full_name"),
@@ -3679,9 +3360,7 @@ class OrderService:
                                         order_dict.get("invoice_date"),
                                         safe_float(order_dict.get("invoice_amount")),
                                         order_dict.get("eway_bill_number"),
-                                        # Products and package
-                                        products_json,
-                                        safe_int(order_dict.get("product_quantity"), 1),
+                                        # Package dimensions
                                         safe_float(order_dict.get("length"), 0.0),
                                         safe_float(order_dict.get("breadth"), 0.0),
                                         safe_float(order_dict.get("height"), 0.0),
@@ -3696,9 +3375,6 @@ class OrderService:
                                         str(order_dict.get("zone", "")),
                                         str(order_dict.get("status", "new")),
                                         str(order_dict.get("sub_status", "new")),
-                                        # JSON fields
-                                        action_history_json,
-                                        order_tags_json,
                                         # Default values
                                         0,  # clone_order_count
                                         0,  # cancel_count
@@ -3751,17 +3427,17 @@ class OrderService:
                                 # Build the complete bulk insert SQL
                                 bulk_insert_sql = f"""
                                 INSERT INTO "order" (
-                                    uuid, order_id, order_type, order_date, channel, company_id, client_id,
+                                    uuid, order_id, order_date, channel, client_id,
                                     consignee_full_name, consignee_phone, consignee_alternate_phone, consignee_email,
                                     consignee_company, consignee_gstin, consignee_address, consignee_landmark,
                                     consignee_pincode, consignee_city, consignee_state, consignee_country,
-                                    billing_is_same_as_consignee, billing_full_name, billing_phone, billing_email,
+                                    is_billing_same_as_consignee, billing_full_name, billing_phone, billing_email,
                                     billing_address, billing_landmark, billing_pincode, billing_city, billing_state, billing_country,
                                     pickup_location_code, payment_mode, total_amount, order_value,
                                     shipping_charges, cod_charges, discount, gift_wrap_charges, other_charges, tax_amount,
                                     invoice_number, invoice_date, invoice_amount, eway_bill_number,
-                                    products, product_quantity, length, breadth, height, weight, applicable_weight, volumetric_weight,
-                                    zone, status, sub_status, action_history, order_tags,
+                                    length, breadth, height, weight, applicable_weight, volumetric_weight,
+                                    zone, status, sub_status,
                                     clone_order_count, cancel_count, is_label_generated, is_deleted, created_at, updated_at, last_update_date
                                 ) VALUES {', '.join(values_placeholders)}
                                 """
@@ -4492,16 +4168,6 @@ class OrderService:
                 db.close()
 
     @staticmethod
-    def dev_cancel_awbs():
-
-        time.sleep(3)
-        return GenericResponseModel(
-            status=True,
-            status_code=http.HTTPStatus.OK,
-            message="cancelled successfully",
-        )
-
-    @staticmethod
     def get_previous_orders(order_id: str, page_number: int = 1, batch_size: int = 10):
         """
         Get previous orders for the same phone number as the given order ID with pagination
@@ -4718,8 +4384,7 @@ class OrderService:
             company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
 
-            # query the db for fetching the latest 5 orders with distinct addresses
-            # Using DISTINCT ON with matching ORDER BY expression
+            # query the db for fetching the latest 3 orders with distinct addresses
 
             customers = (
                 db.query(Order)
@@ -4729,7 +4394,7 @@ class OrderService:
                     Order.consignee_phone == phone,
                 )
                 .distinct(Order.consignee_address)
-                .order_by( asc(Order.consignee_address), desc(Order.created_at))
+                .order_by(asc(Order.consignee_address), desc(Order.created_at))
                 .limit(3)
                 .all()
             )
@@ -4772,10 +4437,6 @@ class OrderService:
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
             )
-
-        finally:
-            if db:
-                db.close()
 
     @staticmethod
     def export_orders(order_filters: Order_filters):
@@ -5884,11 +5545,6 @@ class OrderService:
                 print(3)
 
                 order_data["client_id"] = client_id
-                order_data["company_id"] = company_id
-
-                # adding the extra default details to the order
-
-                order_data["order_type"] = "B2C"
 
                 # round the volumetric weight to 3 decimal places
                 volumetric_weight = round(
@@ -6113,18 +5769,22 @@ class OrderService:
                     .first()
                 )
 
+                from models.order_audit_log import OrderAuditLog
+
                 if existing_order:
                     # If the order exists, update its attributes
+                    # Filter out products as it's stored in separate table
                     for key, value in newOrder.items():
-                        setattr(existing_order, key, value)
+                        if key != "products" and hasattr(existing_order, key):
+                            setattr(existing_order, key, value)
 
-                    # Update the tracking info
-                    existing_order.tracking_info.append(
-                        {
-                            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                            "event": "Order Updated on Platform",
-                        }
+                    # Add audit log entry
+                    audit_log = OrderAuditLog.log_order_updated(
+                        order_id=existing_order.id,
+                        user_id=None,
+                        user_name="WooCommerce Sync",
                     )
+                    db.add(audit_log)
 
                     # Commit the changes to the database
                     db.commit()
@@ -6134,16 +5794,24 @@ class OrderService:
                     }  # Return the updated order
                 else:
                     # If the order does not exist, create a new one
-
-                    final = Order(**{**newOrder, "status": "New"})
-                    final.tracking_info = [
-                        {
-                            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                            "event": "Order Created on Platform",
-                        }
-                    ]
+                    # Remove products from order data (stored in separate table)
+                    order_data_for_db = {
+                        k: v for k, v in newOrder.items() if k != "products"
+                    }
+                    final = Order(**{**order_data_for_db, "status": "New"})
 
                     db.add(final)
+                    db.flush()
+
+                    # Add audit log entry
+                    audit_log = OrderAuditLog.log_order_created(
+                        order_id=final.id,
+                        user_id=None,
+                        user_name="WooCommerce Sync",
+                        source="woocommerce",
+                    )
+                    db.add(audit_log)
+
                     db.commit()
 
                 return {"code": 200, "message": "Order Created"}

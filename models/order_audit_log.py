@@ -3,7 +3,7 @@ Order Audit Log Model
 Stores action history for each order.
 Normalized from the action_history JSONB column in the order table.
 
-This is separate from the global activity_log table due to the 
+This is separate from the global activity_log table due to the
 massive volume of order-related actions at scale.
 """
 
@@ -27,7 +27,7 @@ from database import DBBaseClass, DBBase
 class OrderAuditLog(DBBase, DBBaseClass):
     """
     Represents a single audit log entry for an order.
-    
+
     Tracks all actions performed on an order:
     - Order created
     - Order updated
@@ -36,10 +36,10 @@ class OrderAuditLog(DBBase, DBBaseClass):
     - Pickup scheduled
     - Cancelled
     - etc.
-    
+
     Relationships:
     - Many OrderAuditLog entries belong to one Order
-    
+
     Performance Considerations:
     - Indexed on order_id for fast order lookups
     - Indexed on action for action-type queries
@@ -60,11 +60,11 @@ class OrderAuditLog(DBBase, DBBaseClass):
     # Action details
     action = Column(String(100), nullable=False, index=True)
     message = Column(String(500), nullable=False)
-    
+
     # Who performed the action
     user_id = Column(Integer, nullable=True, index=True)
     user_name = Column(String(100), nullable=True)  # Denormalized for display
-    
+
     # When the action occurred
     timestamp = Column(
         TIMESTAMP(timezone=True),
@@ -123,7 +123,9 @@ class OrderAuditLog(DBBase, DBBaseClass):
             "message": self.message,
             "user_id": self.user_id,
             "user_name": self.user_name,
-            "timestamp": self.timestamp.strftime("%Y-%m-%d %H:%M") if self.timestamp else None,
+            "timestamp": (
+                self.timestamp.strftime("%Y-%m-%d %H:%M") if self.timestamp else None
+            ),
             "extra_data": self.extra_data,
         }
 
@@ -139,7 +141,7 @@ class OrderAuditLog(DBBase, DBBaseClass):
     ) -> "OrderAuditLog":
         """
         Factory method to create an audit log entry.
-        
+
         Args:
             order_id: The order this log belongs to
             action: Action type (use class constants)
@@ -147,7 +149,7 @@ class OrderAuditLog(DBBase, DBBaseClass):
             user_id: ID of user who performed the action
             user_name: Name of user (denormalized)
             extra_data: Additional context as dict
-            
+
         Returns:
             OrderAuditLog instance (not yet added to session)
         """
@@ -162,7 +164,13 @@ class OrderAuditLog(DBBase, DBBaseClass):
         )
 
     @classmethod
-    def log_order_created(cls, order_id: int, user_id: int = None, user_name: str = None, source: str = "platform") -> "OrderAuditLog":
+    def log_order_created(
+        cls,
+        order_id: int,
+        user_id: int = None,
+        user_name: str = None,
+        source: str = "platform",
+    ) -> "OrderAuditLog":
         """Log order creation"""
         return cls.create_log(
             order_id=order_id,
@@ -174,7 +182,14 @@ class OrderAuditLog(DBBase, DBBaseClass):
         )
 
     @classmethod
-    def log_awb_assigned(cls, order_id: int, awb_number: str, courier: str, user_id: int = None, user_name: str = None) -> "OrderAuditLog":
+    def log_awb_assigned(
+        cls,
+        order_id: int,
+        awb_number: str,
+        courier: str,
+        user_id: int = None,
+        user_name: str = None,
+    ) -> "OrderAuditLog":
         """Log AWB assignment"""
         return cls.create_log(
             order_id=order_id,
@@ -186,7 +201,14 @@ class OrderAuditLog(DBBase, DBBaseClass):
         )
 
     @classmethod
-    def log_status_change(cls, order_id: int, old_status: str, new_status: str, user_id: int = None, user_name: str = None) -> "OrderAuditLog":
+    def log_status_change(
+        cls,
+        order_id: int,
+        old_status: str,
+        new_status: str,
+        user_id: int = None,
+        user_name: str = None,
+    ) -> "OrderAuditLog":
         """Log status change"""
         return cls.create_log(
             order_id=order_id,
@@ -198,7 +220,13 @@ class OrderAuditLog(DBBase, DBBaseClass):
         )
 
     @classmethod
-    def log_order_cancelled(cls, order_id: int, reason: str = None, user_id: int = None, user_name: str = None) -> "OrderAuditLog":
+    def log_order_cancelled(
+        cls,
+        order_id: int,
+        reason: str = None,
+        user_id: int = None,
+        user_name: str = None,
+    ) -> "OrderAuditLog":
         """Log order cancellation"""
         return cls.create_log(
             order_id=order_id,
@@ -209,55 +237,85 @@ class OrderAuditLog(DBBase, DBBaseClass):
             extra_data={"reason": reason} if reason else None,
         )
 
-    @staticmethod
-    def bulk_create_from_history(order_id: int, history_list: list) -> list:
-        """
-        Create multiple OrderAuditLog instances from legacy action_history format.
-        Used for data migration from old JSONB format.
-        
-        Args:
-            order_id: The order these logs belong to
-            history_list: List of {timestamp, message, user_data} dicts
-            
-        Returns:
-            List of OrderAuditLog instances
-        """
-        logs = []
-        for entry in history_list:
-            if entry and entry.get("message"):
-                # Parse timestamp
-                ts = entry.get("timestamp")
-                if isinstance(ts, str):
-                    try:
-                        ts = datetime.strptime(ts, "%Y-%m-%d %H:%M")
-                        ts = timezone("Asia/Kolkata").localize(ts)
-                    except ValueError:
-                        ts = datetime.now(timezone("Asia/Kolkata"))
-                elif ts is None:
-                    ts = datetime.now(timezone("Asia/Kolkata"))
+    @classmethod
+    def log_order_updated(
+        cls,
+        order_id: int,
+        user_id: int = None,
+        user_name: str = None,
+        changes: dict = None,
+    ) -> "OrderAuditLog":
+        """Log order update"""
+        return cls.create_log(
+            order_id=order_id,
+            action=cls.ACTION_UPDATED,
+            message="Order updated on platform",
+            user_id=user_id,
+            user_name=user_name,
+            extra_data={"changes": changes} if changes else None,
+        )
 
-                log = OrderAuditLog(
-                    order_id=order_id,
-                    action=OrderAuditLog.ACTION_UPDATED,  # Default for legacy
-                    message=str(entry.get("message", ""))[:500],
-                    user_id=entry.get("user_data") if isinstance(entry.get("user_data"), int) else None,
-                    timestamp=ts,
-                )
-                logs.append(log)
-        return logs
+    @classmethod
+    def log_order_cloned(
+        cls,
+        order_id: int,
+        source_order_id: str,
+        user_id: int = None,
+        user_name: str = None,
+    ) -> "OrderAuditLog":
+        """Log order cloning"""
+        return cls.create_log(
+            order_id=order_id,
+            action=cls.ACTION_CLONED,
+            message=f"Order cloned from {source_order_id}",
+            user_id=user_id,
+            user_name=user_name,
+            extra_data={"source_order_id": source_order_id},
+        )
+
+    @classmethod
+    def log_dimensions_updated(
+        cls,
+        order_id: int,
+        old_dims: dict,
+        new_dims: dict,
+        user_id: int = None,
+        user_name: str = None,
+    ) -> "OrderAuditLog":
+        """Log dimension/weight update"""
+        return cls.create_log(
+            order_id=order_id,
+            action=cls.ACTION_DIMENSIONS_UPDATED,
+            message="Package dimensions updated",
+            user_id=user_id,
+            user_name=user_name,
+            extra_data={"old": old_dims, "new": new_dims},
+        )
+
+    @classmethod
+    def log_pickup_location_changed(
+        cls,
+        order_id: int,
+        old_location: str,
+        new_location: str,
+        user_id: int = None,
+        user_name: str = None,
+    ) -> "OrderAuditLog":
+        """Log pickup location change"""
+        return cls.create_log(
+            order_id=order_id,
+            action=cls.ACTION_PICKUP_LOCATION_CHANGED,
+            message=f"Pickup location changed from {old_location} to {new_location}",
+            user_id=user_id,
+            user_name=user_name,
+            extra_data={"old_location": old_location, "new_location": new_location},
+        )
 
     @classmethod
     def get_for_order(cls, order_id: int, db, limit: int = 50):
         """
         Get audit logs for an order, most recent first.
-        
-        Args:
-            order_id: The order to get logs for
-            db: Database session
-            limit: Maximum number of logs to return
-            
-        Returns:
-            List of OrderAuditLog instances
+
         """
         return (
             db.query(cls)
@@ -266,4 +324,3 @@ class OrderAuditLog(DBBase, DBBaseClass):
             .limit(limit)
             .all()
         )
-

@@ -25,7 +25,6 @@ from utils.response_handler import build_api_response
 
 # services
 from .order_service import OrderService
-from .services import OrderCreationService
 
 
 # Creating the router for orders
@@ -43,10 +42,8 @@ async def create_order(
     order_data: Order_create_request_model,
 ):
     try:
-        # Use new OrderCreationService
-        service = OrderCreationService()
-        response: GenericResponseModel = service.create_order(
-            order_data=order_data.model_dump()
+        response: GenericResponseModel = OrderService.create_order(
+            order_data=order_data
         )
         return build_api_response(response)
 

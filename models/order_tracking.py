@@ -77,6 +77,14 @@ class OrderTracking(DBBase, DBBaseClass):
         Index("ix_order_tracking_v2_datetime", "event_datetime"),
         # Composite for order + status
         Index("ix_order_tracking_v2_order_status", "order_id", "status"),
+        # Deduplication constraint: prevent duplicate tracking events
+        # Same order + status + event_datetime = duplicate
+        Index(
+            "ix_order_tracking_v2_dedup",
+            "order_id", "status", "event_datetime",
+            unique=True,
+            postgresql_where=text("is_deleted = false"),
+        ),
     )
 
     def to_dict(self):
