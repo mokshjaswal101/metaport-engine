@@ -23,6 +23,8 @@ from openpyxl.styles import Alignment, PatternFill, Font
 
 
 from context_manager.context import context_user_data, get_db_session
+from utils.datetime import convert_to_utc
+from utils.string import round_to_2_decimal_place
 
 from logger import logger
 
@@ -45,11 +47,6 @@ from models import Return_Order, Order, Pickup_Location
 
 
 original_tz = "Asia/Kolkata"
-
-
-def round_to_2_decimal_place(value):
-    """Round a float to 2 decimal places."""
-    return round(value, 2)
 
 
 def calculate_order_values(order_data):
@@ -83,27 +80,6 @@ def get_next_wednesday(date):
     # Get the next Wednesday after D+5
     days_ahead = (2 - d_plus_5.weekday() + 7) % 7  # Wednesday is weekday 2
     return d_plus_5 + timedelta(days=days_ahead)
-
-
-def convert_to_utc(order_date, original_tz="Asia/Kolkata"):
-    # Check if order_date is a string and needs parsing
-    if isinstance(order_date, str):
-        # Parse the date from the string if it's a string
-        order_date = datetime.strptime(order_date, "%Y-%m-%d %H:%M:%S")
-
-    # Set the original timezone if it's naive
-    local_tz = pytz.timezone(original_tz)
-    if order_date.tzinfo is None:
-        order_date_localized = local_tz.localize(order_date)
-    else:
-        order_date_localized = order_date
-
-    # Convert to UTC
-    order_date_utc = order_date_localized.astimezone(pytz.utc)
-
-    print(order_date_utc)
-
-    return order_date_utc
 
 
 class ReturnService:

@@ -23,13 +23,19 @@ from models import (
     Company_Contract,
     Client_Contract,
     Shipping_Partner,
+    Courier_Blocked_Pincode,
 )
 
 # schema
 from schema.base import GenericResponseModel
 from data.courier_service_mapping import courier_service_mapping
 
-from .byoc_schema import CourierFilterRequest
+from .byoc_schema import (
+    CourierFilterRequest,
+    BlockedPincodeRequest,
+    RemoveBlockedPincodeRequest,
+    GetBlockedPincodesRequest,
+)
 
 
 # service
@@ -776,4 +782,202 @@ class ManageCourierForClient:
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="Unable to get balance",
+            )
+
+    # ============================================
+    # COURIER SETTINGS - PINCODE BLOCKING
+    # ============================================
+
+    @staticmethod
+    def get_blocked_pincodes(request: GetBlockedPincodesRequest) -> GenericResponseModel:
+        """Get all blocked pincodes for a specific courier"""
+        try:
+            with get_db_session() as db:
+                client_id = context_user_data.get().client_id
+
+                # Get the courier rate record
+                courier_rate = (
+                    db.query(New_Company_To_Client_Rate)
+                    .filter(
+                        New_Company_To_Client_Rate.uuid == request.courier_uuid,
+                        New_Company_To_Client_Rate.client_id == client_id,
+                    )
+                    .first()
+                )
+
+                if not courier_rate:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.NOT_FOUND,
+                        status=False,
+                        message="Courier not found",
+                    )
+
+                # Get blocked pincodes for this courier
+                blocked_pincodes = (
+                    db.query(Courier_Blocked_Pincode)
+                    .filter(
+                        Courier_Blocked_Pincode.client_id == client_id,
+                        Courier_Blocked_Pincode.courier_rate_id == courier_rate.id,
+                        Courier_Blocked_Pincode.is_deleted == False,
+                    )
+                    .all()
+                )
+
+                result = [
+                    {
+                        "pincode": bp.pincode,
+                        "reason": bp.reason,
+                        "created_at": bp.created_at.isoformat() if bp.created_at else None,
+                    }
+                    for bp in blocked_pincodes
+                ]
+
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.OK,
+                    status=True,
+                    message="Blocked pincodes fetched successfully",
+                    data=result,
+                )
+
+        except Exception as e:
+            logger.error(
+                extra=context_user_data.get(),
+                msg=f"Error fetching blocked pincodes: {str(e)}",
+            )
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                status=False,
+                message="Failed to fetch blocked pincodes",
+            )
+
+    @staticmethod
+    def add_blocked_pincodes(request: BlockedPincodeRequest) -> GenericResponseModel:
+        """Add blocked pincodes for a specific courier"""
+        try:
+            with get_db_session() as db:
+                client_id = context_user_data.get().client_id
+
+                # Get the courier rate record
+                courier_rate = (
+                    db.query(New_Company_To_Client_Rate)
+                    .filter(
+                        New_Company_To_Client_Rate.uuid == request.courier_uuid,
+                        New_Company_To_Client_Rate.client_id == client_id,
+                    )
+                    .first()
+                )
+
+                if not courier_rate:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.NOT_FOUND,
+                        status=False,
+                        message="Courier not found",
+                    )
+
+                # Get existing blocked pincodes to avoid duplicates
+                existing_pincodes = (
+                    db.query(Courier_Blocked_Pincode.pincode)
+                    .filter(
+                        Courier_Blocked_Pincode.client_id == client_id,
+                        Courier_Blocked_Pincode.courier_rate_id == courier_rate.id,
+                        Courier_Blocked_Pincode.is_deleted == False,
+                    )
+                    .all()
+                )
+                existing_set = {p[0] for p in existing_pincodes}
+
+                # Add new blocked pincodes
+                added_count = 0
+                for pincode in request.pincodes:
+                    pincode_str = str(pincode).strip()
+                    if pincode_str and pincode_str not in existing_set:
+                        new_blocked = Courier_Blocked_Pincode(
+                            client_id=client_id,
+                            courier_rate_id=courier_rate.id,
+                            pincode=pincode_str,
+                            reason=request.reason,
+                        )
+                        db.add(new_blocked)
+                        added_count += 1
+
+                db.commit()
+
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.OK,
+                    status=True,
+                    message=f"Successfully blocked {added_count} pincode(s)",
+                    data={"added_count": added_count},
+                )
+
+        except Exception as e:
+            logger.error(
+                extra=context_user_data.get(),
+                msg=f"Error adding blocked pincodes: {str(e)}",
+            )
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                status=False,
+                message="Failed to add blocked pincodes",
+            )
+
+    @staticmethod
+    def remove_blocked_pincodes(request: RemoveBlockedPincodeRequest) -> GenericResponseModel:
+        """Remove blocked pincodes for a specific courier"""
+        try:
+            with get_db_session() as db:
+                client_id = context_user_data.get().client_id
+
+                # Get the courier rate record
+                courier_rate = (
+                    db.query(New_Company_To_Client_Rate)
+                    .filter(
+                        New_Company_To_Client_Rate.uuid == request.courier_uuid,
+                        New_Company_To_Client_Rate.client_id == client_id,
+                    )
+                    .first()
+                )
+
+                if not courier_rate:
+                    return GenericResponseModel(
+                        status_code=http.HTTPStatus.NOT_FOUND,
+                        status=False,
+                        message="Courier not found",
+                    )
+
+                # Soft delete the specified pincodes
+                removed_count = 0
+                for pincode in request.pincodes:
+                    pincode_str = str(pincode).strip()
+                    blocked = (
+                        db.query(Courier_Blocked_Pincode)
+                        .filter(
+                            Courier_Blocked_Pincode.client_id == client_id,
+                            Courier_Blocked_Pincode.courier_rate_id == courier_rate.id,
+                            Courier_Blocked_Pincode.pincode == pincode_str,
+                            Courier_Blocked_Pincode.is_deleted == False,
+                        )
+                        .first()
+                    )
+                    if blocked:
+                        blocked.is_deleted = True
+                        removed_count += 1
+
+                db.commit()
+
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.OK,
+                    status=True,
+                    message=f"Successfully unblocked {removed_count} pincode(s)",
+                    data={"removed_count": removed_count},
+                )
+
+        except Exception as e:
+            logger.error(
+                extra=context_user_data.get(),
+                msg=f"Error removing blocked pincodes: {str(e)}",
+            )
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
+                status=False,
+                message="Failed to remove blocked pincodes",
             )

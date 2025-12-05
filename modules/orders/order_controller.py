@@ -1,10 +1,7 @@
 import http
 from typing import Any, List, Dict
-from datetime import datetime
 from fastapi import (
     APIRouter,
-    File,
-    Form,
 )
 
 
@@ -57,73 +54,6 @@ async def create_order(
         )
 
 
-# create a new order
-@special_orders_router.post(
-    "/dev/orders/create",
-    status_code=http.HTTPStatus.CREATED,
-    response_model=GenericResponseModel,
-)
-async def create_order(
-    order_data: Order_create_request_model,
-):
-    try:
-        response: GenericResponseModel = OrderService.dev_create_order(
-            order_data=order_data
-        )
-        return build_api_response(response)
-
-    except Exception as e:
-        return build_api_response(
-            GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                data=str(e),
-                message="An error occurred while creating the order.",
-            )
-        )
-
-
-# create a new order
-@special_orders_router.post(
-    "/dev/shipment/cancel/awbs",
-    status_code=http.HTTPStatus.CREATED,
-    response_model=GenericResponseModel,
-)
-async def create_order():
-    try:
-        response: GenericResponseModel = OrderService.dev_cancel_awbs()
-        return build_api_response(response)
-
-    except Exception as e:
-        return build_api_response(
-            GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                data=str(e),
-                message="An error occurred while creating the order.",
-            )
-        )
-
-
-# create a new order
-@special_orders_router.post(
-    "/dev/shipment/cancel/awbs",
-    status_code=http.HTTPStatus.CREATED,
-    response_model=GenericResponseModel,
-)
-async def create_order():
-    try:
-        response: GenericResponseModel = OrderService.dev_cancel_awbs()
-        return build_api_response(response)
-
-    except Exception as e:
-        return build_api_response(
-            GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                data=str(e),
-                message="An error occurred while creating the order.",
-            )
-        )
-
-
 # Edit order
 @order_router.post(
     "/update/{order_id}",
@@ -147,6 +77,7 @@ async def update_order(order_id: str, order_data: Order_create_request_model):
         )
 
 
+# get the list of customers with same phone number
 @order_router.get(
     "/get-customers",
     status_code=http.HTTPStatus.OK,
@@ -155,7 +86,6 @@ async def update_order(order_id: str, order_data: Order_create_request_model):
 async def get_customers(phone: str):
     try:
 
-        print(1)
         response: GenericResponseModel = OrderService.get_customers(phone=phone)
         return build_api_response(response)
 

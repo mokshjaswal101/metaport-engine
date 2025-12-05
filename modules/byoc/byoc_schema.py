@@ -81,3 +81,28 @@ class SingleRateUploadModel(BaseModel):
     rto_e: PositiveFloat
     courier_name: str
     contract_id: int
+
+
+# ============================================
+# COURIER SETTINGS - PINCODE BLOCKING
+# ============================================
+
+class BlockedPincodeRequest(BaseModel):
+    courier_uuid: UUID
+    pincodes: List[str]
+    reason: Optional[str] = None
+
+
+class RemoveBlockedPincodeRequest(BaseModel):
+    courier_uuid: UUID
+    pincodes: List[str]
+
+
+class GetBlockedPincodesRequest(BaseModel):
+    courier_uuid: UUID
+
+
+class BlockedPincodeResponse(BaseModel):
+    pincode: str
+    reason: Optional[str] = None
+    created_at: Optional[str] = None

@@ -15,7 +15,7 @@ class Company(DBBase, DBBaseClass):
     # relationships
     clients = relationship("Client", back_populates="company", lazy="noload")
     users = relationship("User", back_populates="company", lazy="noload")
-    orders = relationship("Order", back_populates="company", lazy="noload")
+    # Note: Orders are now linked directly to Client, not Company
 
     # whenever a company is created, automatically create a company code for it as well
     def __init__(self, company_name):

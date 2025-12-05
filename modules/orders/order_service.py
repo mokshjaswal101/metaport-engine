@@ -4,6 +4,7 @@ from uuid import uuid4
 from sqlalchemy import (
     or_,
     desc,
+    asc,
     cast,
     func,
     text,
@@ -19,7 +20,7 @@ import pandas as pd
 from fastapi import Response
 from psycopg2 import DatabaseError
 from datetime import datetime, timedelta, timezone, date
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.types import DateTime, String
 from typing import List
@@ -34,6 +35,9 @@ import requests
 
 from context_manager.context import context_user_data, get_db_session
 from utils.error_excel_generator import ErrorExcelGenerator
+from utils.datetime import convert_to_utc
+from utils.string import round_to_2_decimal_place
+from modules.pickup_location.pickup_location_service import serialize_pickup_location
 
 from logger import logger
 
@@ -43,6 +47,7 @@ from .order_schema import (
     Order_create_request_model,
     Order_Response_Model,
     Single_Order_Response_Model,
+    OrderItemResponse,
     Order_filters,
     cloneOrderModel,
     customerResponseModel,
@@ -58,6 +63,7 @@ from shipping_partner.shiperfecto.status_mapping import status_mapping
 # models
 from models import (
     Order,
+    OrderItem,
     Pickup_Location,
     Pincode_Mapping,
     Company_To_Client_Contract,
@@ -95,11 +101,6 @@ original_tz = "Asia/Kolkata"
 
 class TempModel(BaseModel):
     client_id: int
-
-
-def round_to_2_decimal_place(value):
-    """Round a float to 2 decimal places."""
-    return round(value, 2)
 
 
 def calculate_order_values(order_data):
@@ -181,71 +182,11 @@ def update_or_create_cod_remittance(order, db):
     return cod_remittance.id
 
 
-def convert_to_utc(order_date, original_tz="Asia/Kolkata"):
-    # Check if order_date is a string and needs parsing
-    if isinstance(order_date, str):
-        # Parse the date from the string if it's a string
-        order_date = datetime.strptime(order_date, "%Y-%m-%d %H:%M:%S")
-
-    # Set the original timezone if it's naive
-    local_tz = pytz.timezone(original_tz)
-    if order_date.tzinfo is None:
-        order_date_localized = local_tz.localize(order_date)
-    else:
-        order_date_localized = order_date
-
-    # Convert to UTC
-    order_date_utc = order_date_localized.astimezone(pytz.utc)
-
-    print(order_date_utc)
-
-    return order_date_utc
-
-
-"""
-Order Service Module - Optimized for High-Performance Bulk Operations
-
-PERFORMANCE OPTIMIZATION NOTES:
-================================
-
-For optimal bulk import performance, ensure the following database indexes exist:
-
-1. Composite index on orders table for duplicate checking:
-   CREATE INDEX CONCURRENTLY idx_order_lookup ON "order" (order_id, company_id, client_id);
-
-2. Index on pickup_location for faster lookups:
-   CREATE INDEX CONCURRENTLY idx_pickup_location_client ON pickup_location (client_id, location_code);
-
-3. Partial index for active orders:
-   CREATE INDEX CONCURRENTLY idx_order_active ON "order" (company_id, client_id) WHERE is_deleted = false;
-
-4. Consider partitioning the orders table by company_id for very large datasets.
-
-Database Settings for Bulk Operations:
-- Increase shared_buffers to 25% of RAM
-- Set work_mem to 256MB for bulk operations
-- Temporarily disable synchronous_commit for bulk imports
-- Use connection pooling to manage concurrent connections
-
-Memory Settings:
-- Ensure the application has sufficient memory for processing large batches
-- Monitor memory usage during bulk operations to prevent OOM errors
-"""
-
-
 class OrderService:
 
     @staticmethod
     def _parse_validation_error(error_message: str) -> str:
-        """
-        Parse Pydantic validation error and extract essential information
 
-        Example input: "Data validation failed: 1 validation error for Order_create_request_model
-        billing_pincode
-          Input should be a valid string [type=string_type, input_value=110075, input_type=int]"
-
-        Output: "billing_pincode: Input should be a valid string"
-        """
         try:
             lines = error_message.split("\n")
             field_name = None
@@ -314,744 +255,389 @@ class OrderService:
     def create_order(
         order_data: Order_create_request_model,
     ):
+        """
+        Create a new order with products stored in order_item table
+        and audit logging in order_audit_log table.
+        """
+        from models.order_item import OrderItem
+        from models.order_audit_log import OrderAuditLog
 
         try:
-            print(order_data, "before process")
-
-            courier_id = order_data.courier
-            del order_data.courier
-
             db = get_db_session()
 
-            company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
+            user_id = context_user_data.get().id
+            user_name = context_user_data.get().first_name
 
-            order = (
+            # Check if order_id already exists for this client
+            existing_order = (
                 db.query(Order)
                 .filter(
                     Order.order_id == order_data.order_id,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
+                    Order.is_deleted == False,
                 )
                 .first()
             )
 
-            # Throw an error if an order id for that client already exists
-            if order:
-
-                if order.status != "new" and order.status != "cancelled":
-
-                    if client_id == 93:
-
-                        return GenericResponseModel(
-                            status_code=http.HTTPStatus.OK,
-                            status=True,
-                            data={
-                                "awb_number": order.awb_number or "",
-                                "delivery_partner": order.courier_partner or "",
-                            },
-                            message="AWB already assigned",
-                        )
-
-                    else:
-
-                        return GenericResponseModel(
-                            status_code=http.HTTPStatus.CONFLICT,
-                            status=False,
-                            data={
-                                "awb_number": order.awb_number or "",
-                                "delivery_partner": order.courier_partner or "",
-                            },
-                            message="AWB already assigned",
-                        )
-
-                if courier_id is not None and order.status == "new":
-                    shipmentResponse = ShipmentService.assign_awb(
-                        CreateShipmentModel(
-                            order_id=order_data.order_id,
-                            contract_id=courier_id,
-                        )
-                    )
-
-                    return shipmentResponse
-
+            if existing_order:
                 return GenericResponseModel(
-                    status_code=http.HTTPStatus.CONFLICT,
+                    status_code=http.HTTPStatus.BAD_REQUEST,
                     data={"order_id": order_data.order_id},
-                    message="Order Id already exists",
+                    message="Order ID already exists",
                 )
 
-            order_data = order_data.model_dump()
+            # Extract products before converting to dict
+            products = order_data.products or []
+            order_dict = order_data.model_dump(exclude={"products"})
 
-            # Add company and client id to the order
+            # Add client id
+            order_dict["client_id"] = client_id
 
-            order_data["client_id"] = client_id
-            order_data["company_id"] = company_id
+            # Calculate order_value from products
+            order_value = (
+                sum(
+                    float(
+                        p.unit_price
+                        if hasattr(p, "unit_price")
+                        else p.get("unit_price", 0)
+                    )
+                    * int(
+                        p.quantity if hasattr(p, "quantity") else p.get("quantity", 1)
+                    )
+                    for p in products
+                )
+                if products
+                else 0
+            )
 
-            # adding the extra default details to the order
+            # Calculate total_amount
+            total_amount = (
+                float(order_dict.get("shipping_charges") or 0)
+                + float(order_dict.get("cod_charges") or 0)
+                + float(order_dict.get("gift_wrap_charges") or 0)
+                + float(order_dict.get("other_charges") or 0)
+                + float(order_dict.get("tax_amount") or 0)
+                + order_value
+                - float(order_dict.get("discount") or 0)
+            )
 
-            order_data["order_type"] = "B2C"
+            order_dict["order_value"] = round(order_value, 2)
+            order_dict["total_amount"] = round(total_amount, 2)
 
-            # rounde the volumetric weight to 3 decimal places
+            # Calculate volumetric and applicable weight
             volumetric_weight = round(
-                (order_data["length"] * order_data["breadth"] * order_data["height"])
+                (order_dict["length"] * order_dict["breadth"] * order_dict["height"])
                 / 5000,
                 3,
             )
+            applicable_weight = round(max(order_dict["weight"], volumetric_weight), 3)
 
-            applicable_weight = round(max(order_data["weight"], volumetric_weight), 3)
+            order_dict["applicable_weight"] = applicable_weight
+            order_dict["volumetric_weight"] = volumetric_weight
 
-            order_data["applicable_weight"] = applicable_weight
-            order_data["volumetric_weight"] = volumetric_weight
+            # Set initial status
+            order_dict["status"] = "new"
+            order_dict["sub_status"] = "new"
 
-            order_data["status"] = "new"
-            order_data["sub_status"] = "new"
-
-            order_data["action_history"] = [
-                {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "message": "Order Created on Platform",
-                    "user_data": context_user_data.get().id,
-                }
-            ]
-
-            # Convert to UTC
-            order_data["order_date"] = convert_to_utc(
-                order_date=order_data["order_date"]
+            # Convert order_date to UTC
+            order_dict["order_date"] = convert_to_utc(
+                order_date=order_dict["order_date"]
             )
 
-            # calc product quantity
-            order_data["product_quantity"] = sum(
-                product["quantity"] for product in order_data["products"]
-            )
-
-            # fetch the pickup location pincode
-            pickup_pincode: int = (
+            # Fetch the pickup location pincode
+            pickup_result = (
                 db.query(Pickup_Location.pincode)
                 .filter(
-                    Pickup_Location.location_code == order_data["pickup_location_code"],
+                    Pickup_Location.location_code == order_dict["pickup_location_code"],
                     Pickup_Location.client_id == client_id,
+                    Pickup_Location.is_deleted == False,
                 )
                 .first()
-            )[0]
+            )
 
-            if pickup_pincode is None:
+            if pickup_result is None:
                 return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message="Invalid Pickup Location",
                 )
 
-            blocked_pickup_pincodes = [
-                "110018",
-                "110031",
-                "110041",
-                "110033",
-                "110043",
-                "110018",
-            ]
+            pickup_pincode = pickup_result[0]
 
-            if client_id == 93 and pickup_pincode in blocked_pickup_pincodes:
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.BAD_REQUEST,
-                    message="Pickup location not servicable",
-                )
-
-            # calculating shipping zone for the order
+            # Calculate shipping zone
             zone_data = ShipmentService.calculate_shipping_zone(
-                pickup_pincode, order_data["consignee_pincode"]
+                pickup_pincode, order_dict["consignee_pincode"]
             )
 
-            # return error message if could not calculate zone
             if not zone_data.status:
-                GenericResponseModel(
+                return GenericResponseModel(
                     status_code=http.HTTPStatus.BAD_REQUEST,
                     message="Invalid Pincodes",
                     status=False,
                 )
 
-            zone = zone_data.data["zone"]
-            order_data["zone"] = zone
+            order_dict["zone"] = zone_data.data["zone"]
 
-            order_model_instance = Order.create_db_entity(order_data)
+            # Create order entity
+            order_model_instance = Order.create_db_entity(order_dict)
+            db.add(order_model_instance)
+            db.flush()  # Get the order ID without committing
 
-            created_order = Order.create_new_order(order_model_instance)
-
-            db.commit()
-            print(courier_id, "**courier_id**")
-            if courier_id is not None:
-                shipmentResponse = ShipmentService.assign_awb(
-                    CreateShipmentModel(
-                        order_id=order_data["order_id"],
-                        contract_id=courier_id,
-                    )
+            # Create order items from products
+            if products:
+                order_items = OrderItem.bulk_create_from_products(
+                    order_id=order_model_instance.id,
+                    products=[
+                        p.model_dump() if hasattr(p, "model_dump") else p
+                        for p in products
+                    ],
                 )
-                print("inside shipment response", shipmentResponse)
-                db.commit()
-                return shipmentResponse
-            else:
-                # logger.info(">START COURIER WITH COURIER PRIORITY>")
-                # START COURIER PRIORITY FEATURE
-                result_config_setting = (
-                    db.query(
-                        Courier_Priority_Config_Setting.courier_method,
-                    )
-                    .filter(
-                        Courier_Priority_Config_Setting.client_id == client_id,
-                        Courier_Priority_Config_Setting.company_id == company_id,
-                        Courier_Priority_Config_Setting.status == True,
-                    )
-                    .first()
-                )
-                if result_config_setting:
-                    courier_method = result_config_setting[0]
-                    print(courier_method, "<<courier_method>>")
-                    if courier_method == "courier_assign_rules":
-                        # logger.info(
-                        #     f"I am {courier_method} Enabled for this order_id => {order_data["order_id"]}"
-                        # )
-                        courier_priority_rules = (
-                            db.query(Courier_Priority_Rules)
-                            .filter(
-                                and_(
-                                    Courier_Priority_Rules.status == True,
-                                    Courier_Priority_Rules.client_id == client_id,
-                                )
-                            )
-                            .order_by(Courier_Priority_Rules.ordering_key.asc())
-                            .all()
-                        )
+                db.add_all(order_items)
 
-                        if (
-                            len(courier_priority_rules) > 0
-                            and courier_priority_rules != None
-                        ):
-                            print("I AM UNDER APPLU RULES FETCH DATA")
-                            list_Section = ShipmentService.apply_rules_and_fetch_data(
-                                courier_priority_rules,
-                                order_data["order_id"],
-                                db,
-                            )
-                            print(list_Section, "|>*|list_Section|<*|")
-                            if len(list_Section) > 0:
-                                return list_Section[0]
-                            else:
-                                print("NO Order Shipped With Courier Assing ")
-
-                            # logger.info(
-                            #     f"There are No Rule Available for this order_id => {order_data["order_id"]}"
-                            # )
-
-                    if courier_method == "courier_priority":
-                        # logger.info(
-                        #      f"I am {courier_method} Enabled for this order_id => {order_data["order_id"]}"
-                        # )
-                        courier_priority = (
-                            db.query(Courier_Priority.priority_type)
-                            .filter(Courier_Priority.client_id == client_id)
-                            .first()
-                        )
-                        # logger.info(
-                        #     f"Courier Priority NEW ACTION {format(str(courier_priority))}"
-                        # )
-                        if courier_priority != None:
-                            assign_priority_wise_courier = (
-                                ShipmentService.assign_priority_wise_courier(
-                                    courier_priority[0], order_data["order_id"]
-                                )
-                            )
-                            print(
-                                jsonable_encoder(assign_priority_wise_courier),
-                                ">**FINAL ACTION TRIGGER**< I AM ORDER SERVICE FILE",
-                            )
-                            if (
-                                len(assign_priority_wise_courier) > 0
-                                and assign_priority_wise_courier != None
-                            ):
-                                print(
-                                    "Successfull assign AWB=>",
-                                    assign_priority_wise_courier,
-                                )
-                                return assign_priority_wise_courier[0]
-                            else:
-                                # Return error response
-                                return GenericResponseModel(
-                                    status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                                    message="An error occurred while creating the Order.",
-                                )
-                        else:
-                            # logger.info(
-                            #     f"There are No Courier Priority Selected order_id => {order_data["order_id"]}"
-                            # )
-                            return GenericResponseModel(
-                                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                                message="An error occurred while creating the Order.",
-                            )
-                else:
-                    # logger.info(">>** Courier-Allocation Feature IS DISABLED **<<")
-                    print(">>** Courier-Allocation Feature IS DISABLED **<<")
-
-            # IF CLIENT HAS ADDED CUSTOM PERIORITY
+            # Create audit log entry
+            audit_log = OrderAuditLog.log_order_created(
+                order_id=order_model_instance.id,
+                user_id=user_id,
+                user_name=user_name,
+                source="platform",
+            )
+            db.add(audit_log)
 
             return GenericResponseModel(
                 status_code=http.HTTPStatus.OK,
                 message="Order created Successfully",
-                data={"order_id": created_order.order_id},
+                data={"order_id": order_model_instance.order_id},
                 status=True,
             )
 
         except DatabaseError as e:
-            # Log database error
+            db.rollback()
             logger.error(
                 extra=context_user_data.get(),
                 msg="Error creating Order: {}".format(str(e)),
             )
-
-            # Return error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An error occurred while creating the Order.",
             )
 
         except Exception as e:
-            # Log other unhandled exceptions
+            db.rollback()
             logger.error(
                 extra=context_user_data.get(),
                 msg="Unhandled error: {}".format(str(e)),
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
             )
-
-        finally:
-            if db:
-                db.close()
-
-    @staticmethod
-    def dev_create_order(
-        order_data: Order_create_request_model,
-    ):
-
-        print("developement")
-        try:
-            print(order_data)
-            courier_id = order_data.courier
-            del order_data.courier
-
-            with get_db_session() as db:
-
-                company_id = context_user_data.get().company_id
-                client_id = context_user_data.get().client_id
-
-                order = (
-                    db.query(Order)
-                    .filter(
-                        Order.order_id == order_data.order_id,
-                        Order.company_id == company_id,
-                        Order.client_id == client_id,
-                    )
-                    .first()
-                )
-
-                # Throw an error if an order id for that client already exists
-                if order:
-
-                    if order.status != "new" and order.status != "cancelled":
-
-                        if client_id == 93:
-
-                            return GenericResponseModel(
-                                status_code=http.HTTPStatus.OK,
-                                status=False,
-                                data={
-                                    "awb_number": order.awb_number or "",
-                                    "delivery_partner": order.courier_partner or "",
-                                },
-                                message="AWB already assigned",
-                            )
-
-                        else:
-
-                            return GenericResponseModel(
-                                status_code=http.HTTPStatus.CONFLICT,
-                                status=False,
-                                data={
-                                    "awb_number": order.awb_number or "",
-                                    "delivery_partner": order.courier_partner or "",
-                                },
-                                message="AWB already assigned",
-                            )
-
-                    if courier_id is not None and order.status == "new":
-                        shipmentResponse = ShipmentService.dev_assign_awb(
-                            order=order,
-                            courier_id=courier_id,
-                        )
-
-                        return shipmentResponse
-
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.CONFLICT,
-                        data={"order_id": order_data.order_id},
-                        message="Order Id already exists",
-                    )
-
-                order_data = order_data.model_dump()
-
-                if not re.search(
-                    r"\d", order_data["consignee_address"]
-                ):  # Check if there's at least one digit
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Consignee address must contain a house number or street number",
-                    )
-
-                # Add company and client id to the order
-
-                order_data["client_id"] = client_id
-                order_data["company_id"] = company_id
-
-                # adding the extra default details to the order
-
-                order_data["order_type"] = "B2C"
-
-                # rounde the volumetric weight to 3 decimal places
-                volumetric_weight = round(
-                    (
-                        order_data["length"]
-                        * order_data["breadth"]
-                        * order_data["height"]
-                    )
-                    / 5000,
-                    3,
-                )
-
-                applicable_weight = round(
-                    max(order_data["weight"], volumetric_weight), 3
-                )
-
-                order_data["applicable_weight"] = applicable_weight
-                order_data["volumetric_weight"] = volumetric_weight
-
-                order_data["status"] = "new"
-                order_data["sub_status"] = "new"
-
-                order_data["action_history"] = [
-                    {
-                        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                        "message": "Order Created on Platform",
-                        "user_data": context_user_data.get().id,
-                    }
-                ]
-
-                # Convert to UTC
-                order_data["order_date"] = convert_to_utc(
-                    order_date=order_data["order_date"]
-                )
-
-                # calc product quantity
-                order_data["product_quantity"] = sum(
-                    product["quantity"] for product in order_data["products"]
-                )
-
-                pickup_location = (
-                    db.query(Pickup_Location.pincode)
-                    .filter(
-                        Pickup_Location.location_code
-                        == order_data["pickup_location_code"],
-                        Pickup_Location.client_id == client_id,
-                    )
-                    .first()
-                )
-
-                if not pickup_location:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pickup Location",
-                    )
-
-                # fetch the pickup location pincode
-                pickup_pincode = pickup_location.pincode
-
-                if pickup_pincode is None:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pickup Location",
-                    )
-
-                # calculating shipping zone for the order
-                zone_data = ShipmentService.calculate_shipping_zone(
-                    pickup_pincode, order_data["consignee_pincode"]
-                )
-
-                # return error message if could not calculate zone
-                if not zone_data.status:
-                    GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pincodes",
-                        status=False,
-                    )
-
-                zone = zone_data.data["zone"]
-                order_data["zone"] = zone
-
-                order_model_instance = Order.create_db_entity(order_data)
-
-                if courier_id == "1056" or courier_id == 1056:
-
-                    awb = (
-                        f"SITP0000{uuid4().int % 1000000:06d}"
-                        if order_data["payment_mode"].lower() == "prepaid"
-                        else f"C0000{uuid4().int % 1000000:06d}"
-                    )
-
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={
-                            "awb_number": awb or "",
-                            "delivery_partner": "Ekart 2 Kg" or "",
-                        },
-                        message="AWB assigned",
-                    )
-
-                if courier_id == "4057" or courier_id == 4057:
-
-                    prefix = random.choice([17, 18])
-                    suffix = uuid4().int % 10**8
-                    awb = f"SF{prefix}{suffix:08d}WAO"
-
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.OK,
-                        status=True,
-                        data={
-                            "awb_number": awb or "",
-                            "delivery_partner": "Shadowfax" or "",
-                        },
-                        message="AWB assigned",
-                    )
-
-                else:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        status=False,
-                        message="Invalid Courier Id",
-                    )
-
-                if courier_id is not None:
-                    shipmentResponse = ShipmentService.dev_assign_awb(
-                        order=created_order,
-                        courier_id=courier_id,
-                    )
-
-                    print("inside shipment response", shipmentResponse)
-
-                    # db.commit()
-
-                    return shipmentResponse
-
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.OK,
-                    message="Order created Successfully",
-                    data={"order_id": created_order.order_id},
-                    status=True,
-                )
-
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error creating Order: {}".format(str(e)),
-            )
-
-            # Return error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while creating the Order.",
-            )
-
-        except Exception as e:
-            # Log other unhandled exceptions
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Unhandled error: {}".format(str(e)),
-            )
-            # Return a general internal server error response
-            return GenericResponseModel(
-                status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An internal server error occurred. Please try again later.",
-            )
-
-        finally:
-            if db:
-                db.close()
-
-    @staticmethod
-    def dev_cancel_awbs():
-
-        time.sleep(3)
-        return GenericResponseModel(
-            status=True,
-            status_code=http.HTTPStatus.OK,
-            message="cancelled successfully",
-        )
 
     @staticmethod
     def update_order(order_id: str, order_data: Order_create_request_model):
+        """
+        Update an existing order. Only orders with status 'new' can be updated.
+        Products are updated in order_item table, audit log in order_audit_log table.
+        """
+        from models.order_item import OrderItem
+        from models.order_audit_log import OrderAuditLog
 
         try:
+            db = get_db_session()
 
-            with get_db_session() as db:
+            client_id = context_user_data.get().client_id
+            user_id = context_user_data.get().id
+            user_name = context_user_data.get().name
 
-                company_id = context_user_data.get().company_id
-                client_id = context_user_data.get().client_id
+            # Find the existing order
+            order = (
+                db.query(Order)
+                .filter(
+                    Order.order_id == order_id,
+                    Order.client_id == client_id,
+                    Order.is_deleted == False,
+                )
+                .first()
+            )
 
-                # Find the existing order from the db
-                order = (
+            if order is None:
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    data={"order_id": order_data.order_id},
+                    message="Order does not exist",
+                )
+
+            if order.status != "new":
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    message="Order already processed, cannot be updated",
+                )
+
+            # Check if order_id is being changed and new one already exists
+            if order_id != order_data.order_id:
+                check_existing_order = (
                     db.query(Order)
                     .filter(
-                        Order.order_id == order_id,
-                        Order.company_id == company_id,
+                        Order.order_id == order_data.order_id,
                         Order.client_id == client_id,
+                        Order.is_deleted == False,
                     )
                     .first()
                 )
 
-                # if order not found, throw an error
-                if order is None:
+                if check_existing_order:
                     return GenericResponseModel(
                         status_code=http.HTTPStatus.BAD_REQUEST,
                         data={"order_id": order_data.order_id},
-                        message="Order does not exist",
+                        message="This order id already exists for another order",
                     )
 
-                if order.status != "new":
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Order cannot be updated",
+            # Extract products before converting to dict
+            products = order_data.products or []
+            order_dict = order_data.model_dump(exclude={"products"})
+
+            # Calculate order_value from products
+            order_value = (
+                sum(
+                    float(
+                        p.unit_price
+                        if hasattr(p, "unit_price")
+                        else p.get("unit_price", 0)
                     )
-
-                # check if the new order id is already present or not
-
-                if order_id != order_data.order_id:
-
-                    check_existing_order = (
-                        db.query(Order)
-                        .filter(
-                            Order.order_id == order_data.order_id,
-                            Order.company_id == company_id,
-                            Order.client_id == client_id,
-                        )
-                        .first()
+                    * int(
+                        p.quantity if hasattr(p, "quantity") else p.get("quantity", 1)
                     )
-
-                    # if order not found, throw an error
-                    if check_existing_order:
-                        return GenericResponseModel(
-                            status_code=http.HTTPStatus.BAD_REQUEST,
-                            data={"order_id": order_data.order_id},
-                            message="Order id cannot be updates as order id already exists",
-                        )
-
-                order_data = order_data.model_dump()
-
-                # Process and update all the fields in the order with the new data
-                for key, value in order_data.items():
-                    setattr(order, key, value)
-
-                # round the volumetric weight to 3 decimal places
-                volumetric_weight = round(
-                    (
-                        order_data["length"]
-                        * order_data["breadth"]
-                        * order_data["height"]
-                    )
-                    / 5000,
-                    3,
+                    for p in products
                 )
-
-                applicable_weight = round(
-                    max(order_data["weight"], volumetric_weight), 3
-                )
-
-                order.applicable_weight = applicable_weight
-                order.volumetric_weight = volumetric_weight
-
-                # Convert to UTC
-                order.order_date = convert_to_utc(order_date=order.order_date)
-
-                new_activity = {
-                    "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M"),
-                    "message": "Order Updated on Platform",
-                    "user_data": context_user_data.get().id,
-                }
-                order.action_history.append(new_activity)
-
-                # fetch the pickup location pincode
-                pickup_pincode: int = (
-                    db.query(Pickup_Location.pincode)
-                    .filter(
-                        Pickup_Location.location_code
-                        == order_data["pickup_location_code"]
-                    )
-                    .first()
-                )[0]
-
-                if pickup_pincode is None:
-                    return GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pickup Location",
-                    )
-
-                # calculating shipping zone for the order
-                zone_data = ShipmentService.calculate_shipping_zone(
-                    pickup_pincode, order_data["consignee_pincode"]
-                )
-
-                # return error message if could not calculate zone
-                if not zone_data.status:
-                    GenericResponseModel(
-                        status_code=http.HTTPStatus.BAD_REQUEST,
-                        message="Invalid Pincodes",
-                        status=False,
-                    )
-
-                zone = zone_data.data.get("zone", "E")
-                order.zone = zone
-
-                order.sub_status = "new"
-
-                # Commit the updated order to the database
-                db.add(order)
-                db.commit()
-
-                return GenericResponseModel(
-                    status_code=http.HTTPStatus.OK,
-                    message="Order updated Successfully",
-                    status=True,
-                )
-
-        except DatabaseError as e:
-            # Log database error
-            logger.error(
-                extra=context_user_data.get(),
-                msg="Error creating Order: {}".format(str(e)),
+                if products
+                else 0
             )
 
-            # Return error response
+            # Calculate total_amount
+            total_amount = (
+                float(order_dict.get("shipping_charges") or 0)
+                + float(order_dict.get("cod_charges") or 0)
+                + float(order_dict.get("gift_wrap_charges") or 0)
+                + float(order_dict.get("other_charges") or 0)
+                + float(order_dict.get("tax_amount") or 0)
+                + order_value
+                - float(order_dict.get("discount") or 0)
+            )
+
+            order_dict["order_value"] = round(order_value, 2)
+            order_dict["total_amount"] = round(total_amount, 2)
+
+            # Fields that should not be updated directly
+            exclude_fields = {
+                "client_id",
+                "status",
+                "sub_status",
+                "zone",
+                "applicable_weight",
+                "volumetric_weight",
+            }
+
+            # Update order fields
+            for key, value in order_dict.items():
+                if key not in exclude_fields and hasattr(order, key):
+                    setattr(order, key, value)
+
+            # Calculate volumetric and applicable weight
+            volumetric_weight = round(
+                (order_dict["length"] * order_dict["breadth"] * order_dict["height"])
+                / 5000,
+                3,
+            )
+            applicable_weight = round(max(order_dict["weight"], volumetric_weight), 3)
+
+            order.applicable_weight = applicable_weight
+            order.volumetric_weight = volumetric_weight
+
+            # Convert order_date to UTC
+            order.order_date = convert_to_utc(order_date=order.order_date)
+
+            # Fetch the pickup location pincode
+            pickup_result = (
+                db.query(Pickup_Location.pincode)
+                .filter(
+                    Pickup_Location.location_code == order_dict["pickup_location_code"],
+                    Pickup_Location.client_id == client_id,
+                    Pickup_Location.is_deleted == False,
+                )
+                .first()
+            )
+
+            if pickup_result is None:
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    message="Invalid Pickup Location",
+                )
+
+            pickup_pincode = pickup_result[0]
+
+            # Calculate shipping zone
+            zone_data = ShipmentService.calculate_shipping_zone(
+                pickup_pincode, order_dict["consignee_pincode"]
+            )
+
+            if not zone_data.status:
+                return GenericResponseModel(
+                    status_code=http.HTTPStatus.BAD_REQUEST,
+                    message="Invalid Pincodes",
+                    status=False,
+                )
+
+            order.zone = zone_data.data.get("zone", "E")
+            order.sub_status = "new"
+
+            # Replace order items: delete existing and create new ones
+            if products:
+                db.query(OrderItem).filter(OrderItem.order_id == order.id).delete(
+                    synchronize_session=False
+                )
+                db.add_all(
+                    OrderItem.bulk_create_from_products(
+                        order_id=order.id,
+                        products=[
+                            p.model_dump() if hasattr(p, "model_dump") else p
+                            for p in products
+                        ],
+                    )
+                )
+
+            # Create audit log entry
+            audit_log = OrderAuditLog.log_order_updated(
+                order_id=order.id,
+                user_id=user_id,
+                user_name=user_name,
+            )
+            db.add(audit_log)
+
+            # Commit all changes
+            db.commit()
+
+            return GenericResponseModel(
+                status_code=http.HTTPStatus.OK,
+                message="Order updated Successfully",
+                status=True,
+            )
+
+        except DatabaseError as e:
+            db.rollback()
+            logger.error(
+                extra=context_user_data.get(),
+                msg="Error updating Order: {}".format(str(e)),
+            )
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-                message="An error occurred while creating the Order.",
+                message="An error occurred while updating the Order.",
             )
 
         except Exception as e:
-            # Log other unhandled exceptions
+            db.rollback()
             logger.error(
                 extra=context_user_data.get(),
                 msg="Unhandled error: {}".format(str(e)),
             )
-            # Return a general internal server error response
             return GenericResponseModel(
                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
                 message="An internal server error occurred. Please try again later.",
@@ -1072,7 +658,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -1134,1713 +719,6 @@ class OrderService:
 
             db = get_db_session()
 
-            # ids = [
-            #     "3422",
-            #     "3453",
-            #     "3502",
-            #     "3545",
-            #     "3429",
-            #     "3470",
-            #     "3505",
-            #     "3408",
-            #     "3455",
-            #     "3484",
-            #     "3419",
-            #     "3503",
-            #     "3468",
-            #     "3497",
-            #     "3432",
-            #     "3463",
-            #     "3500",
-            #     "3434",
-            #     "3489",
-            #     "3516",
-            #     "3421",
-            #     "3465",
-            #     "3493",
-            #     "3414",
-            #     "3488",
-            #     "3427",
-            #     "3464",
-            #     "3499",
-            #     "3402",
-            #     "3457",
-            #     "3487",
-            #     "3411",
-            #     "3469",
-            #     "3492",
-            #     "3410",
-            #     "3451",
-            #     "3481",
-            #     "3437",
-            #     "3476",
-            #     "3436",
-            #     "3483",
-            #     "3531",
-            #     "3405",
-            #     "3458",
-            #     "3486",
-            #     "3472",
-            #     "3398",
-            #     "3449",
-            #     "3480",
-            #     "3417",
-            #     "3508",
-            #     "3400",
-            #     "3435",
-            #     "3482",
-            #     "3529",
-            #     "3439",
-            #     "3498",
-            #     "3532",
-            #     "3446",
-            #     "3490",
-            #     "3528",
-            #     "3404",
-            #     "3452",
-            #     "3471",
-            #     "3425",
-            #     "3474",
-            #     "3510",
-            #     "3416",
-            #     "3456",
-            #     "3494",
-            #     "3424",
-            #     "3475",
-            #     "3506",
-            #     "3403",
-            #     "3454",
-            #     "3485",
-            #     "3413",
-            #     "3466",
-            #     "3513",
-            #     "3442",
-            #     "3445",
-            #     "3479",
-            #     "3459",
-            #     "3473",
-            #     "3507",
-            #     "3509",
-            #     "3530",
-            #     "3578",
-            #     "3443",
-            #     "3501",
-            #     "3514",
-            #     "3431",
-            #     "3478",
-            #     "3433",
-            #     "3495",
-            #     "3396",
-            #     "3511",
-            #     "3552",
-            #     "3394",
-            #     "3448",
-            #     "3477",
-            #     "3496",
-            #     "3418",
-            #     "3491",
-            #     "3519",
-            #     "3428",
-            #     "3462",
-            #     "3440",
-            #     "3515",
-            #     "3564",
-            # ]
-
-            # # COD Remittance Validation Logic
-            # print("Starting COD Remittance validation...")
-
-            # # Get all COD remittance records for the specified IDs
-            # cod_remittances = (
-            #     db.query(COD_Remittance).filter(COD_Remittance.id.in_(ids)).all()
-            # )
-
-            # mismatched_ids = []
-
-            # for cod_remittance in cod_remittances:
-            #     # Get all orders linked to this COD remittance cycle
-            #     orders_in_cycle = (
-            #         db.query(Order)
-            #         .filter(Order.cod_remittance_cycle_id == cod_remittance.id)
-            #         .all()
-            #     )
-
-            #     # Calculate actual totals from orders
-            #     actual_order_count = len(orders_in_cycle)
-            #     actual_total_amount = sum(
-            #         float(order.total_amount or 0) for order in orders_in_cycle
-            #     )
-
-            #     # Get COD remittance recorded values
-            #     recorded_order_count = cod_remittance.order_count or 0
-            #     recorded_generated_cod = float(cod_remittance.generated_cod or 0)
-
-            #     # Check for mismatches
-            #     amount_mismatch = (
-            #         abs(actual_total_amount - recorded_generated_cod) > 0.01
-            #     )  # Using small tolerance for decimal comparison
-            #     count_mismatch = actual_order_count != recorded_order_count
-
-            #     if amount_mismatch or count_mismatch:
-            #         mismatch_info = {
-            #             "cod_remittance_id": cod_remittance.id,
-            #             "amount_mismatch": amount_mismatch,
-            #             "count_mismatch": count_mismatch,
-            #             "actual_order_count": actual_order_count,
-            #             "recorded_order_count": recorded_order_count,
-            #             "actual_total_amount": actual_total_amount,
-            #             "recorded_generated_cod": recorded_generated_cod,
-            #         }
-            #         mismatched_ids.append(mismatch_info)
-
-            #         print(f"MISMATCH FOUND for COD Remittance ID: {cod_remittance.id}")
-            #         if amount_mismatch:
-            #             print(
-            #                 f"  Amount Mismatch - Actual: {actual_total_amount}, Recorded: {recorded_generated_cod}"
-            #             )
-            #         if count_mismatch:
-            #             print(
-            #                 f"  Count Mismatch - Actual: {actual_order_count}, Recorded: {recorded_order_count}"
-            #             )
-            #     else:
-            #         print(
-            #             f"✓ COD Remittance ID {cod_remittance.id} - No mismatch found"
-            #         )
-
-            # # Print summary of mismatched IDs
-            # if mismatched_ids:
-            #     print(
-            #         f"\nSUMMARY: Found {len(mismatched_ids)} COD remittance records with mismatches:"
-            #     )
-            #     for mismatch in mismatched_ids:
-            #         print(f"ID: {mismatch['cod_remittance_id']}")
-            # else:
-            #     print(
-            #         "\n✓ All COD remittance records validated successfully - no mismatches found!"
-            #     )
-
-            # # Return validation results instead of continuing with clone logic
-            # return GenericResponseModel(
-            #     status_code=http.HTTPStatus.OK,
-            #     message="COD Remittance validation completed",
-            #     status=True,
-            #     data={
-            #         "total_validated": len(cod_remittances),
-            #         "mismatched_count": len(mismatched_ids),
-            #         "mismatched_ids": [m["cod_remittance_id"] for m in mismatched_ids],
-            #         "detailed_mismatches": mismatched_ids,
-            #     },
-            # )
-
-            # # Import required modules for calculation
-            # from data.courier_buy_rates import calculate_buy_freight
-            # from models.courier_billing import CourierBilling
-            # from decimal import Decimal
-            # from sqlalchemy.orm import joinedload
-
-            # # Fetch orders with their billing records in a single query to avoid N+1
-            # orders = (
-            #     db.query(Order)
-            #     .filter(
-            #         Order.aggregator == "xpressbees",
-            #         Order.booking_date > "2025-06-01 00:00:00.000 +0530",
-            #         Order.courier_partner.in_(["xpressbees", "xpressbees 1kg"]),
-            #     )
-            #     .options(joinedload(Order.courier_billing))
-            #     .order_by(desc(Order.booking_date))
-            #     .all()
-            # )
-
-            # size = len(orders)
-            # count = 1
-
-            # for order in orders:
-
-            #     print("processing ", count, " of ", size, " orders")
-            #     count += 1
-            #     # calculate the shiperfecto freight using shiperfecto rates
-            #     # and then assign to courier_billing calculated_freight and calculated_tax
-
-            #     try:
-            #         # Get billing records from the eagerly loaded relationship
-            #         billing_records = [
-            #             record
-            #             for record in order.courier_billing
-            #             if not record.is_deleted
-            #         ]
-
-            #         create_new_record = False
-            #         if not billing_records:
-            #             print(
-            #                 f"No billing records found for order {order.order_id}, will create new record"
-            #             )
-            #             create_new_record = True
-
-            #         # Prepare parameters for rate calculation
-            #         from data.courier_buy_rates import normalize_courier_partner
-
-            #         aggregator = "xpressbees"
-            #         raw_courier_partner = (
-            #             order.courier_partner if order.courier_partner else ""
-            #         )
-
-            #         # Normalize courier partner name to match configuration
-            #         courier_partner = normalize_courier_partner(
-            #             aggregator, raw_courier_partner
-            #         )
-
-            #         if not courier_partner:
-            #             print(
-            #                 f"  Could not determine courier partner for order {order.order_id}: {raw_courier_partner}"
-            #             )
-            #             continue
-
-            #         zone = order.zone.lower() if order.zone else "d"
-            #         applicable_weight = float(order.applicable_weight)
-            #         order_value = float(order.total_amount)
-            #         payment_mode = (
-            #             order.payment_mode.lower() if order.payment_mode else "cod"
-            #         )
-
-            #         # Check if order is RTO
-            #         is_rto = (
-            #             order.courier_status and "rto" in order.courier_status.lower()
-            #         )
-
-            #         print(f"Calculating for Order ID: {order.order_id}")
-            #         print(
-            #             f"  Raw Courier: {raw_courier_partner} -> Normalized: {courier_partner}"
-            #         )
-            #         print(
-            #             f"  Zone: {zone}, Weight: {applicable_weight}, Value: {order_value}"
-            #         )
-            #         print(f"  Payment: {payment_mode}, RTO: {is_rto}")
-
-            #         # Calculate buy freight using the courier_buy_rates module
-            #         freight_calculation = calculate_buy_freight(
-            #             aggregator=aggregator,
-            #             courier=courier_partner,
-            #             zone=zone,
-            #             applicable_weight=applicable_weight,
-            #             order_value=order_value,
-            #             payment_mode=payment_mode,
-            #             is_rto=is_rto,
-            #         )
-
-            #         if "error" in freight_calculation:
-            #             print(
-            #                 f"  Error calculating freight: {freight_calculation['error']}"
-            #             )
-            #             continue
-
-            #         # Extract calculated values
-            #         calculated_freight = Decimal(str(freight_calculation["freight"]))
-            #         calculated_tax = Decimal(str(freight_calculation["tax_amount"]))
-
-            #         print(
-            #             f"  Calculated - Freight: {calculated_freight}, Tax: {calculated_tax}"
-            #         )
-
-            #         if create_new_record:
-            #             # Create new courier billing record
-            #             new_billing_record = CourierBilling(
-            #                 order_id=order.id,
-            #                 awb_number=order.awb_number,
-            #                 calculated_freight=calculated_freight,
-            #                 calculated_tax=calculated_tax,
-            #                 final_freight=None,
-            #                 final_tax=None,
-            #             )
-            #             db.add(new_billing_record)
-            #             # db.flush()  # Get the ID
-            #             print(
-            #                 f"  Created new billing record ID: {new_billing_record.id}"
-            #             )
-            #         else:
-            #             # Update existing billing records for this order
-            #             for billing_record in billing_records:
-            #                 if (
-            #                     billing_record.calculated_freight is None
-            #                     or billing_record.calculated_tax is None
-            #                 ):
-            #                     billing_record.calculated_freight = calculated_freight
-            #                     billing_record.calculated_tax = calculated_tax
-            #                     print(
-            #                         f"  Updated billing record ID: {billing_record.id}"
-            #                     )
-
-            #         # Commit after each order to avoid large transactions
-
-            #     except Exception as e:
-            #         print(f"Error processing order {order.order_id}: {str(e)}")
-            #         db.rollback()
-            #         continue
-
-            #     db.commit()
-
-            # return
-
-            # adhoc
-
-            # import os
-            # import pandas as pd
-            # from openpyxl import Workbook
-
-            # pincodes = [
-            #     "302026",
-            #     "303103",
-            #     "401105",
-            #     "395004",
-            #     "395010",
-            #     "421302",
-            # ]
-
-            # for pincode in pincodes:
-
-            #     # Read the CSV file
-            #     csv_file_path = os.path.join(
-            #         os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
-            #         f"{pincode}.csv",
-            #     )
-
-            #     if os.path.exists(csv_file_path):
-            #         try:
-            #             # Read CSV file
-            #             df = pd.read_csv(csv_file_path)
-
-            #             # Filter to only consider data with courier = "blue dart"
-            #             if "Courier" in df.columns:
-            #                 df = df[df["Courier"].str.lower() == "blue dart"]
-
-            #             # Check if required columns exist
-            #             if "Delivery Pincode" in df.columns:
-            #                 source_pincode = pincode
-
-            #                 # Create zone mapping based on delivery pincodes
-            #                 zone_mapping = []
-
-            #                 # Get source pincode mapping record for zone calculation
-            #                 source_pincode_record = (
-            #                     db.query(Pincode_Mapping)
-            #                     .filter(Pincode_Mapping.pincode == int(source_pincode))
-            #                     .first()
-            #                 )
-
-            #                 # Extract all delivery pincodes from DataFrame
-            #                 all_delivery_pincodes = [
-            #                     int(row["Delivery Pincode"])
-            #                     for index, row in df.iterrows()
-            #                 ]
-
-            #                 # Fetch all pincode mapping records in a single query to avoid N+1 problem
-            #                 pincode_mapping_records = (
-            #                     db.query(Pincode_Mapping)
-            #                     .filter(
-            #                         Pincode_Mapping.pincode.in_(all_delivery_pincodes)
-            #                     )
-            #                     .all()
-            #                 )
-
-            #                 # Create a dictionary for quick lookup
-            #                 pincode_mapping_dict = {
-            #                     record.pincode: record
-            #                     for record in pincode_mapping_records
-            #                 }
-
-            #                 for index, row in df.iterrows():
-            #                     delivery_pincode = str(row["Delivery Pincode"])
-
-            #                     print(delivery_pincode, ">>delivery_pincode<<")
-
-            #                     print(
-            #                         len(pincode_mapping_records),
-            #                         ">>pincode_mapping_records<<",
-            #                     )
-
-            #                     # service_prepaid = str(row["ekart_lm_prepaid"])
-            #                     # service_cod = str(row["ekart_lm_cod"])
-
-            #                     # print(
-            #                     #     service_cod,
-            #                     #     service_prepaid,
-            #                     #     ">>service_cod, service_prepaid<<",
-            #                     # )
-
-            #                     # if service_prepaid != "True" and service_cod != "True":
-            #                     #     continue
-
-            #                     # Get destination pincode mapping record from pre-fetched dictionary
-            #                     destination_pincode_record = pincode_mapping_dict.get(
-            #                         int(delivery_pincode)
-            #                     )
-
-            #                     # Initialize zone_calculation_method variable
-            #                     zone_calculation_method = "Fallback"
-
-            #                     if destination_pincode_record:
-            #                         print(
-            #                             destination_pincode_record.pincode,
-            #                             ">>destination_pincode_record<<",
-            #                         )
-
-            #                     # Use serviceability zone calculation logic
-            #                     if source_pincode_record and destination_pincode_record:
-            #                         calculated_zone = (
-            #                             OrderService.calculate_zone_optimized(
-            #                                 source_pincode_record,
-            #                                 destination_pincode_record,
-            #                             )
-            #                         )
-            #                         zone_calculation_method = "Serviceability Logic"
-
-            #                     else:
-            #                         # Fallback to simple calculation if pincode mapping not found
-            #                         calculated_zone = "D"
-            #                         zone_calculation_method = "Fallback"
-
-            #                     print(calculated_zone)
-
-            #                     zone_mapping.append(
-            #                         {
-            #                             "Source_Pincode": source_pincode,
-            #                             "Delivery_Pincode": delivery_pincode,
-            #                             "Courier": "Bluedart",
-            #                             "Zone": calculated_zone,
-            #                         }
-            #                     )
-
-            #                 # Create DataFrame from zone mapping
-            #                 zone_df = pd.DataFrame(zone_mapping)
-
-            #                 # Save to Excel file
-            #                 excel_file_path = os.path.join(
-            #                     os.path.dirname(
-            #                         os.path.dirname(os.path.dirname(__file__))
-            #                     ),
-            #                     f"zone_mapping_{pincode}.xlsx",
-            #                 )
-
-            #                 with pd.ExcelWriter(
-            #                     excel_file_path, engine="openpyxl"
-            #                 ) as writer:
-            #                     zone_df.to_excel(
-            #                         writer, sheet_name="Zone_Mapping", index=False
-            #                     )
-
-            #                     # Add summary sheet
-            #                     # summary_data = zone_df.groupby("Calculated_Zone").agg(
-            #                     #     {"Delivery_Pincode": "count"}
-            #                     # )
-            #                     # summary_data.columns = ["Count"]
-            #                     # summary_data.to_excel(writer, sheet_name="Zone_Summary")
-
-            #                     # # Add method breakdown summary
-            #                     # method_summary = (
-            #                     #     zone_df.groupby(
-            #                     #         ["Zone_Calculation_Method", "Calculated_Zone"]
-            #                     #     )
-            #                     #     .size()
-            #                     #     .unstack(fill_value=0)
-            #                     # )
-            #                     # method_summary.to_excel(
-            #                     #     writer, sheet_name="Method_Summary"
-            #                     # )
-
-            #                 logger.info(
-            #                     f"Zone mapping created successfully. Total records: {len(zone_mapping)}"
-            #                 )
-            #                 logger.info(f"Excel file saved at: {excel_file_path}")
-
-            #                 # return GenericResponseModel(
-            #                 #     status_code=http.HTTPStatus.OK,
-            #                 #     message=f"Zone mapping created successfully. {len(zone_mapping)} records processed and saved to Excel.",
-            #                 #     status=True,
-            #                 #     data={
-            #                 #         "total_records": len(zone_mapping),
-            #                 #         "excel_file_path": excel_file_path,
-            #                 #         "zone_distribution": zone_df["Calculated_Zone"]
-            #                 #         .value_counts()
-            #                 #         .to_dict(),
-            #                 #     },
-            #                 # )
-            #             else:
-            #                 # return GenericResponseModel(
-            #                 #     status_code=http.HTTPStatus.BAD_REQUEST,
-            #                 #     message="'Delivery Pincode' column not found in CSV file",
-            #                 #     status=False,
-            #                 # )
-            #                 continue
-
-            #         except Exception as csv_error:
-            #             logger.error(f"Error processing CSV file: {str(csv_error)}")
-            #             return GenericResponseModel(
-            #                 status_code=http.HTTPStatus.INTERNAL_SERVER_ERROR,
-            #                 message=f"Error processing CSV file: {str(csv_error)}",
-            #                 status=False,
-            #             )
-            #     else:
-            #         return GenericResponseModel(
-            #             status_code=http.HTTPStatus.NOT_FOUND,
-            #             message="CSV file RTO.csv not found in root directory",
-            #             status=False,
-            #         )
-
-            # return
-
-            # client_id = 93
-
-            # orders = (
-            #     db.query(Order)
-            #     .filter(
-            #         Order.client_id == client_id,
-            #         Order.status != "new",
-            #         Order.status != "cancelled",
-            #         Order.tracking_info != None,
-            #         Order.aggregator.in_(["shiperfecto"]),
-            #         Order.booking_date > "2025-10-15 23:42:09.430 +0530",
-            #     )
-            #     .all()
-            # )
-
-            # # print(orders)
-
-            # # return
-
-            # for order in orders:
-
-            #     try:
-
-            #         tracking_info = order.tracking_info
-
-            #         if tracking_info is None or len(tracking_info) == 0:
-            #             continue
-
-            #         body = {
-            #             "awb": order.awb_number,
-            #             "current_status": order.sub_status,
-            #             "order_id": order.order_id,
-            #             "current_timestamp": (
-            #                 order.tracking_info[0]["datetime"]
-            #                 if order.tracking_info
-            #                 else order.booking_date.strftime("%d-%m-%Y %H:%M:%S")
-            #             ),
-            #             "shipment_status": order.sub_status,
-            #             "scans": [
-            #                 {
-            #                     "datetime": activity["datetime"],
-            #                     "status": activity["status"],
-            #                     "location": activity["location"],
-            #                 }
-            #                 for activity in order.tracking_info
-            #             ],
-            #         }
-
-            #         response = requests.post(
-            #             url="https://wtpzsmej1h.execute-api.ap-south-1.amazonaws.com/prod/webhook/bluedart",
-            #             verify=True,
-            #             timeout=10,
-            #             json=body,
-            #         )
-
-            #         print(response.json())
-            #         print(order.order_id)
-
-            #     except:
-            #         continue
-
-            # return
-
-            # file_path = "1.csv"
-            # OrderService.bulk_upload_courier_billing_from_file(file_path)
-
-            # file_path = "3.csv"
-            # OrderService.bulk_upload_courier_billing_from_file(file_path)
-
-            # file_path = "1.csv"
-            # OrderService.bulk_upload_courier_billing_from_file(file_path)
-
-            # file_path = "2.csv"
-            # return OrderService.bulk_upload_courier_billing_from_file(file_path)
-
-            # # COD Remittance validation logic - Optimized to avoid N+1 queries
-            # cod_remittance_mismatches = []
-
-            # # Single query to get all COD remittances with their calculated order totals
-            # remittance_totals_query = (
-            #     db.query(
-            #         COD_Remittance.id.label("remittance_id"),
-            #         COD_Remittance.client_id,
-            #         COD_Remittance.generated_cod,
-            #         COD_Remittance.payout_date,
-            #         COD_Remittance.status,
-            #         func.coalesce(func.sum(Order.total_amount), 0).label(
-            #             "calculated_total"
-            #         ),
-            #         func.count(Order.id).label("order_count"),
-            #     )
-            #     .filter(COD_Remittance.client_id != 108, COD_Remittance.client_id != 26)
-            #     .outerjoin(Order, Order.cod_remittance_cycle_id == COD_Remittance.id)
-            #     .group_by(
-            #         COD_Remittance.id,
-            #         COD_Remittance.client_id,
-            #         COD_Remittance.generated_cod,
-            #         COD_Remittance.payout_date,
-            #         COD_Remittance.status,
-            #     )
-            #     .all()
-            # )
-
-            # logger.info(
-            #     f"Found {len(remittance_totals_query)} COD remittance entries to validate"
-            # )
-
-            # # Process results and identify mismatches
-            # mismatched_remittance_ids = []
-            # count = 0
-
-            # for result in remittance_totals_query:
-            #     count += 1
-            #     print(f"checking cycle - {count}")
-
-            #     cod_generated = float(result.generated_cod)
-            #     calculated_total = float(result.calculated_total)
-
-            #     if (
-            #         abs(calculated_total - cod_generated) > 0.01
-            #     ):  # Allow for small floating point differences
-            #         mismatched_remittance_ids.append(result.remittance_id)
-
-            #         mismatch_data = {
-            #             "cod_remittance_id": result.remittance_id,
-            #             "client_id": result.client_id,
-            #             "generated_cod": cod_generated,
-            #             "calculated_total_amount": calculated_total,
-            #             "difference": cod_generated - calculated_total,
-            #             "order_count": result.order_count,
-            #             "payout_date": (
-            #                 result.payout_date.isoformat()
-            #                 if result.payout_date
-            #                 else None
-            #             ),
-            #             "status": result.status,
-            #         }
-            #         cod_remittance_mismatches.append(mismatch_data)
-
-            # # If there are mismatches, get detailed order information for those remittances only
-            # if mismatched_remittance_ids:
-            #     orders_for_mismatched_remittances = (
-            #         db.query(Order)
-            #         .filter(
-            #             Order.cod_remittance_cycle_id.in_(mismatched_remittance_ids)
-            #         )
-            #         .all()
-            #     )
-
-            #     # Group orders by remittance ID
-            #     orders_by_remittance = {}
-            #     for order in orders_for_mismatched_remittances:
-            #         remittance_id = order.cod_remittance_cycle_id
-            #         if remittance_id not in orders_by_remittance:
-            #             orders_by_remittance[remittance_id] = []
-            #         orders_by_remittance[remittance_id].append(
-            #             {
-            #                 "order_id": order.order_id,
-            #                 "total_amount": float(order.total_amount),
-            #                 "status": order.status,
-            #             }
-            #         )
-
-            #     # Add order details to mismatch data
-            #     for mismatch in cod_remittance_mismatches:
-            #         remittance_id = mismatch["cod_remittance_id"]
-            #         mismatch["orders"] = orders_by_remittance.get(remittance_id, [])
-
-            # # Sort mismatches by remittance ID for consistent ordering
-            # cod_remittance_mismatches.sort(key=lambda x: x["cod_remittance_id"])
-
-            # # Save mismatches to a file for review
-            # if cod_remittance_mismatches:
-            #     import json
-            #     from datetime import datetime
-
-            #     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            #     filename = f"cod_remittance_mismatches_{timestamp}.json"
-            #     filepath = os.path.join("uploads", filename)
-
-            #     # Ensure uploads directory exists
-            #     os.makedirs("uploads", exist_ok=True)
-
-            #     with open(filepath, "w") as f:
-            #         json.dump(cod_remittance_mismatches, f, indent=2, default=str)
-
-            #     logger.warning(
-            #         f"Found {len(cod_remittance_mismatches)} COD remittance mismatches. Saved to {filepath}"
-            #     )
-
-            #     # Also log summary
-            #     for mismatch in cod_remittance_mismatches:
-            #         logger.warning(
-            #             f"COD Remittance ID {mismatch['cod_remittance_id']}: "
-            #             f"Generated COD: {mismatch['generated_cod']}, "
-            #             f"Calculated Total: {mismatch['calculated_total_amount']}, "
-            #             f"Difference: {mismatch['difference']}"
-            #         )
-            # else:
-            #     logger.info(
-            #         "All COD remittance entries match their associated orders' total amounts"
-            #     )
-
-            # # Return the results for immediate review
-            # return GenericResponseModel(
-            #     status_code=http.HTTPStatus.OK,
-            #     message=f"COD Remittance validation completed. Found {len(cod_remittance_mismatches)} mismatches.",
-            #     data={
-            #         "total_remittances_checked": len(cod_remittances),
-            #         "mismatches_found": len(cod_remittance_mismatches),
-            #         "mismatches": (
-            #             cod_remittance_mismatches[:10]
-            #             if cod_remittance_mismatches
-            #             else []
-            #         ),  # Show first 10 for immediate review
-            #     },
-            # )
-
-            # contracts = (
-            #     db.query(Company_To_Client_Contract)
-            #     .filter(Company_To_Client_Contract.client_id.in_([434]))
-            #     .all()
-            # )
-
-            # for contract in contracts:
-            #     # pull the COD‐rate row (should be exactly one per contract)
-            #     cod = (
-            #         db.query(Company_To_Client_COD_Rates)
-            #         .filter_by(contract_id=contract.id)
-            #         .first()
-            #     )
-
-            #     # pull all the zone‐rate rows
-            #     zone_rows = (
-            #         db.query(Company_To_Client_Rates)
-            #         .filter_by(contract_id=contract.id)
-            #         .all()
-            #     )
-
-            #     # initialize all zone columns to None
-            #     data = {f"base_rate_zone_{z}": None for z in ["a", "b", "c", "d", "e"]}
-            #     data.update(
-            #         {
-            #             f"additional_rate_zone_{z}": None
-            #             for z in ["a", "b", "c", "d", "e"]
-            #         }
-            #     )
-            #     data.update(
-            #         {f"rto_base_rate_zone_{z}": None for z in ["a", "b", "c", "d", "e"]}
-            #     )
-            #     data.update(
-            #         {
-            #             f"rto_additional_rate_zone_{z}": None
-            #             for z in ["a", "b", "c", "d", "e"]
-            #         }
-            #     )
-
-            #     # pivot the zone rows into the columns
-            #     for zr in zone_rows:
-            #         z = zr.zone.lower()
-            #         data[f"base_rate_zone_{z}"] = zr.base_rate
-            #         data[f"additional_rate_zone_{z}"] = zr.additional_rate
-            #         data[f"rto_base_rate_zone_{z}"] = zr.rto_base_rate
-            #         data[f"rto_additional_rate_zone_{z}"] = zr.rto_additional_rate
-
-            #     # build the new denormalized record
-            #     new_rec = New_Company_To_Client_Rate(
-            #         uuid=(uuid4()),  # preserve cod_rate.uuid if present
-            #         created_at=cod.created_at if cod else datetime.utcnow(),
-            #         updated_at=cod.updated_at if cod else datetime.utcnow(),
-            #         is_deleted=cod.is_deleted if cod else False,
-            #         rate_type=contract.rate_type,  # or another enum/string you use
-            #         percentage_rate=cod.percentage_rate if cod else None,
-            #         absolute_rate=cod.absolute_rate if cod else None,
-            #         isActive=contract.isActive,  # or contract.is_active
-            #         company_id=1,
-            #         client_id=contract.client_id,
-            #         company_contract_id=contract.company_contract_id,
-            #         aggregator_courier_id=contract.aggregator_courier_id,
-            #         # zone‐based freight/rto rates
-            #         **data,
-            #     )
-
-            #     db.add(new_rec)
-
-            # db.commit()
-            # db.close()
-            # print(f"Done: migrated rates for {len(contracts)} contracts.")
-
-            # return GenericResponseModel(
-            #     status_code=http.HTTPStatus.OK,
-            #     message="Order cloned successfully",
-            #     status=True,
-            # # )
-
-            # db = get_db_session()
-
-            # from marketplace.easyecom.easyecom_service import EasyEcomService
-
-            # orders = (
-            #     db.query(Order)
-            #     .filter(
-            #         Order.client_id == 310,
-            #         # Order.delivered_date > "2025-10-06 00:00:00.000 +0530",
-            #         Order.delivered_date > "2025-10-21 00:00:00.000 +0530",
-            #         Order.status == "delivered",
-            #     )
-            #     .all()
-            # )
-
-            # print(len(orders), "Total orders")
-
-            # for order in orders:
-            #     EasyEcomService.update_order_status_to_easyecom(order)
-
-            # return
-
-            # from shipping_partner.xpressbees.xpressbees import Xpressbees
-            # from shipping_partner.delhivery.delhivery import Delhivery
-            # from shipping_partner.ats.ats import ATS
-            # from shipping_partner.shadowfax.shadowfax import Shadowfax
-
-            # orders = (
-            #     db.query(Order)
-            #     .filter(
-            #         # Order.client_id == 405,
-            #         Order.status == "NDR",
-            #         Order.aggregator.in_(
-            #             ["xpressbees", "delhivery", "amazon", "shadowfax"]
-            #         ),
-            #     )
-            #     .order_by(Order.created_at.desc())
-            #     .all()
-            # )
-
-            # print("Total orders", len(orders))
-
-            # for order in orders:
-
-            #     if order.aggregator == "xpressbees":
-            #         Xpressbees.ndr_action(order, order.awb_number)
-            #     elif order.aggregator == "delhivery":
-            #         Delhivery.ndr_action(order, order.awb_number)
-            #     elif order.aggregator == "ats":
-            #         ATS.ndr_action(order, order.awb_number)
-            #     elif order.aggregator == "shadowfax":
-            #         Shadowfax.ndr_action(order, order.awb_number)
-
-            # print("yayayayayayayayay")
-
-            # return
-
-            # # ADHOC COMPREHENSIVE CLIENT ANALYSIS
-            # # Complete analysis directly in clone_order function
-
-            # from datetime import datetime, timedelta
-            # import pytz
-            # import pandas as pd
-            # import os
-
-            # logger.info("Starting adhoc comprehensive client analysis...")
-
-            # ist_timezone = pytz.timezone("Asia/Kolkata")
-            # current_time = datetime.now(ist_timezone)
-
-            # # Configuration
-            # inactive_days = 15
-            # cutoff_date = current_time - timedelta(days=inactive_days)
-
-            # # ========== PHASE 1: ALL CLIENTS ANALYSIS (EXCLUDING NEVER BOOKED) ==========
-            # logger.info("Phase 1: Analyzing all clients with shipment history...")
-
-            # # Get ALL clients who have EVER placed orders with AWB (excluding never booked)
-            # clients_with_orders = (
-            #     db.query(
-            #         Client.id,
-            #         Client.client_name,
-            #         Client.client_code,
-            #         Client.is_onboarding_completed,
-            #     )
-            #     .join(Order, Client.id == Order.client_id)
-            #     .filter(
-            #         Order.awb_number != None,
-            #         Order.awb_number != "",
-            #         Order.status != "new",
-            #         Order.status != "cancelled",
-            #     )
-            #     .distinct()
-            #     .all()
-            # )
-
-            # logger.info(
-            #     f"Found {len(clients_with_orders)} clients with shipment history"
-            # )
-
-            # # Find recently active clients (with AWB in last 15 days)
-            # recent_active_client_ids = set(
-            #     db.query(Order.client_id)
-            #     .filter(
-            #         Order.booking_date >= cutoff_date,
-            #         Order.awb_number.isnot(None),
-            #         Order.awb_number != "",
-            #     )
-            #     .distinct()
-            #     .all()
-            # )
-            # recent_active_client_ids = {
-            #     client_id[0] for client_id in recent_active_client_ids
-            # }
-
-            # logger.info(
-            #     f"Found {len(recent_active_client_ids)} recently active clients"
-            # )
-
-            # # Analyze each client (both active and inactive)
-            # all_clients_analysis = []
-            # inactive_analysis = []
-            # risk_counts = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
-            # monthly_order_data = []  # For monthly order count table
-
-            # for client in clients_with_orders:
-            #     # Get client metrics
-            #     last_order = (
-            #         db.query(Order)
-            #         .filter(
-            #             Order.client_id == client.id,
-            #             Order.awb_number != None,
-            #             Order.awb_number != "",
-            #             Order.booking_date != None,
-            #             Order.status != "new",
-            #             Order.status != "cancelled",
-            #         )
-            #         .order_by(desc(Order.booking_date))
-            #         .first()
-            #     )
-
-            #     # Calculate days since last order
-            #     days_since_last = "No orders found"
-            #     last_order_date = None
-            #     if last_order and last_order.booking_date:
-            #         last_order_date = last_order.booking_date.strftime(
-            #             "%Y-%m-%d %H:%M:%S"
-            #         )
-            #         if last_order.booking_date.tzinfo is None:
-            #             last_order_aware = ist_timezone.localize(
-            #                 last_order.booking_date
-            #             )
-            #         else:
-            #             last_order_aware = last_order.booking_date
-            #         days_since_last = (current_time - last_order_aware).days
-            #     else:
-            #         # This should not happen since we're only processing clients with orders
-            #         logger.warning(
-            #             f"Client {client.id} ({client.client_name}) has no last order despite being in clients_with_orders"
-            #         )
-
-            #     # Determine if client is currently inactive
-            #     is_currently_inactive = client.id not in recent_active_client_ids
-
-            #     # Get order counts and values
-            #     total_orders = (
-            #         db.query(func.count(Order.id))
-            #         .filter(
-            #             Order.client_id == client.id,
-            #             Order.awb_number.isnot(None),
-            #             Order.awb_number != "",
-            #         )
-            #         .scalar()
-            #     ) or 0
-
-            #     total_value = (
-            #         db.query(func.coalesce(func.sum(Order.total_amount), 0))
-            #         .filter(
-            #             Order.client_id == client.id,
-            #             Order.awb_number.isnot(None),
-            #             Order.awb_number != "",
-            #         )
-            #         .scalar()
-            #     ) or 0
-
-            #     # Get detailed order patterns for different periods
-            #     last_15_days = (
-            #         db.query(func.count(Order.id))
-            #         .filter(
-            #             Order.client_id == client.id,
-            #             Order.booking_date >= current_time - timedelta(days=15),
-            #             Order.awb_number.isnot(None),
-            #             Order.awb_number != "",
-            #         )
-            #         .scalar()
-            #     ) or 0
-
-            #     last_30_days = (
-            #         db.query(func.count(Order.id))
-            #         .filter(
-            #             Order.client_id == client.id,
-            #             Order.booking_date >= current_time - timedelta(days=30),
-            #             Order.awb_number.isnot(None),
-            #             Order.awb_number != "",
-            #         )
-            #         .scalar()
-            #     ) or 0
-
-            #     orders_previous_30_days = (
-            #         db.query(func.count(Order.id))
-            #         .filter(
-            #             Order.client_id == client.id,
-            #             Order.booking_date >= current_time - timedelta(days=60),
-            #             Order.booking_date < current_time - timedelta(days=30),
-            #             Order.awb_number.isnot(None),
-            #             Order.awb_number != "",
-            #         )
-            #         .scalar()
-            #     ) or 0
-
-            #     orders_60_to_90_days_ago = (
-            #         db.query(func.count(Order.id))
-            #         .filter(
-            #             Order.client_id == client.id,
-            #             Order.booking_date >= current_time - timedelta(days=90),
-            #             Order.booking_date < current_time - timedelta(days=60),
-            #             Order.awb_number.isnot(None),
-            #             Order.awb_number != "",
-            #         )
-            #         .scalar()
-            #     ) or 0
-
-            #     # Get monthly order counts for last 6 months
-            #     monthly_counts = []
-            #     for i in range(6):
-            #         # Calculate proper month boundaries
-            #         if i == 0:
-            #             # Current month
-            #             month_start = current_time.replace(
-            #                 day=1, hour=0, minute=0, second=0, microsecond=0
-            #             )
-            #             month_end = current_time
-            #         else:
-            #             # Previous months
-            #             temp_date = current_time.replace(day=1)
-            #             for _ in range(i):
-            #                 temp_date = (temp_date - timedelta(days=1)).replace(day=1)
-            #             month_start = temp_date.replace(
-            #                 hour=0, minute=0, second=0, microsecond=0
-            #             )
-            #             # Calculate end of month
-            #             if temp_date.month == 12:
-            #                 next_month = temp_date.replace(
-            #                     year=temp_date.year + 1, month=1
-            #                 )
-            #             else:
-            #                 next_month = temp_date.replace(month=temp_date.month + 1)
-            #             month_end = next_month - timedelta(seconds=1)
-
-            #         monthly_orders = (
-            #             db.query(func.count(Order.id))
-            #             .filter(
-            #                 Order.client_id == client.id,
-            #                 Order.booking_date >= month_start,
-            #                 Order.booking_date <= month_end,
-            #                 Order.awb_number.isnot(None),
-            #                 Order.awb_number != "",
-            #             )
-            #             .scalar()
-            #         ) or 0
-
-            #         monthly_counts.append(
-            #             {
-            #                 "month": month_start.strftime("%Y-%m"),
-            #                 "orders": monthly_orders,
-            #             }
-            #         )
-
-            #     # Calculate average daily orders for different periods
-            #     avg_daily_orders_recent_30_days = (
-            #         round(last_30_days / 30, 2) if last_30_days > 0 else 0
-            #     )
-            #     avg_daily_orders_previous_30_days = (
-            #         round(orders_previous_30_days / 30, 2)
-            #         if orders_previous_30_days > 0
-            #         else 0
-            #     )
-            #     avg_daily_orders_60_to_90_days = (
-            #         round(orders_60_to_90_days_ago / 30, 2)
-            #         if orders_60_to_90_days_ago > 0
-            #         else 0
-            #     )
-
-            #     # Calculate volume change percentages
-            #     recent_vs_previous_30_days_change = None
-            #     previous_30_vs_60_to_90_days_change = None
-            #     current_vs_previous_month_change = None
-
-            #     if orders_previous_30_days > 0:
-            #         recent_vs_previous_30_days_change = round(
-            #             (
-            #                 (last_30_days - orders_previous_30_days)
-            #                 / orders_previous_30_days
-            #             )
-            #             * 100,
-            #             2,
-            #         )
-
-            #     if orders_60_to_90_days_ago > 0:
-            #         previous_30_vs_60_to_90_days_change = round(
-            #             (
-            #                 (orders_previous_30_days - orders_60_to_90_days_ago)
-            #                 / orders_60_to_90_days_ago
-            #             )
-            #             * 100,
-            #             2,
-            #         )
-
-            #     if len(monthly_counts) >= 2 and monthly_counts[1]["orders"] > 0:
-            #         current_vs_previous_month_change = round(
-            #             (
-            #                 (monthly_counts[0]["orders"] - monthly_counts[1]["orders"])
-            #                 / monthly_counts[1]["orders"]
-            #             )
-            #             * 100,
-            #             2,
-            #         )
-
-            #     # Add to monthly order data for separate sheet with proper month names as keys
-            #     monthly_data_entry = {
-            #         "client_id": client.id,
-            #         "client_name": client.client_name,
-            #         "total_orders": total_orders,
-            #         "avg_monthly_orders": (
-            #             round(
-            #                 sum([m["orders"] for m in monthly_counts])
-            #                 / len(monthly_counts),
-            #                 2,
-            #             )
-            #             if monthly_counts
-            #             else 0
-            #         ),
-            #     }
-
-            #     # Add each month's data with the actual month name as key
-            #     for i, month_data in enumerate(monthly_counts):
-            #         month_name = month_data["month"]
-            #         if i == 0:
-            #             monthly_data_entry[f"{month_name}_Current"] = month_data[
-            #                 "orders"
-            #             ]
-            #         else:
-            #             monthly_data_entry[month_name] = month_data["orders"]
-
-            #     monthly_order_data.append(monthly_data_entry)
-
-            #     # Risk assessment (enhanced for volume drops)
-            #     risk_level = "LOW"
-            #     volume_drop_risk = False
-
-            #     # Check for significant volume drops
-            #     if (
-            #         recent_vs_previous_30_days_change
-            #         and recent_vs_previous_30_days_change < -50
-            #         and last_30_days < orders_previous_30_days
-            #         and orders_previous_30_days >= 30
-            #     ):
-            #         volume_drop_risk = True
-            #     elif (
-            #         current_vs_previous_month_change
-            #         and current_vs_previous_month_change < -60
-            #         and monthly_counts[1]["orders"] >= 50
-            #     ):
-            #         volume_drop_risk = True
-
-            #     # Enhanced risk assessment
-            #     if (
-            #         (total_value >= 50000 and total_orders >= 50)
-            #         or total_value >= 100000
-            #         or volume_drop_risk
-            #     ):
-            #         risk_level = "HIGH"
-            #     elif (
-            #         (total_value >= 10000 and total_orders >= 20)
-            #         or (
-            #             isinstance(days_since_last, int)
-            #             and days_since_last <= 45
-            #             and total_orders >= 10
-            #         )
-            #         or (
-            #             recent_vs_previous_30_days_change
-            #             and recent_vs_previous_30_days_change < -30
-            #         )
-            #     ):
-            #         risk_level = "MEDIUM"
-
-            #     # Only count risk for inactive clients
-            #     if is_currently_inactive:
-            #         risk_counts[risk_level] += 1
-
-            #     client_data = {
-            #         "client_id": client.id,
-            #         "client_name": client.client_name,
-            #         "client_code": client.client_code,
-            #         "last_order_date": last_order_date,
-            #         "days_since_last_order": days_since_last,
-            #         "is_currently_inactive": is_currently_inactive,
-            #         "total_orders": total_orders,
-            #         "total_order_value": float(total_value),
-            #         "orders_last_15_days": last_15_days,
-            #         "orders_last_30_days": last_30_days,
-            #         "orders_previous_30_days": orders_previous_30_days,
-            #         "orders_60_to_90_days_ago": orders_60_to_90_days_ago,
-            #         "avg_daily_orders_recent_30_days": avg_daily_orders_recent_30_days,
-            #         "avg_daily_orders_previous_30_days": avg_daily_orders_previous_30_days,
-            #         "avg_daily_orders_60_to_90_days": avg_daily_orders_60_to_90_days,
-            #         "recent_vs_previous_30_days_change_percent": recent_vs_previous_30_days_change,
-            #         "previous_30_vs_60_to_90_days_change_percent": previous_30_vs_60_to_90_days_change,
-            #         "current_vs_previous_month_change_percent": current_vs_previous_month_change,
-            #         "volume_drop_risk": volume_drop_risk,
-            #         "risk_level": risk_level,
-            #         "is_onboarding_completed": client.is_onboarding_completed,
-            #     }
-
-            #     all_clients_analysis.append(client_data)
-
-            #     # Add to inactive analysis if currently inactive
-            #     if is_currently_inactive:
-            #         inactive_analysis.append(client_data)
-
-            # # Sort all clients analysis by volume drop risk and total value
-            # all_clients_analysis.sort(
-            #     key=lambda x: (
-            #         not x["volume_drop_risk"],  # Volume drop risk first
-            #         {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["risk_level"]],
-            #         -x["total_order_value"],
-            #     )
-            # )
-
-            # # Sort inactive analysis by risk level and value
-            # inactive_analysis.sort(
-            #     key=lambda x: (
-            #         {"HIGH": 0, "MEDIUM": 1, "LOW": 2}[x["risk_level"]],
-            #         -x["total_order_value"],
-            #     )
-            # )
-
-            # # Sort monthly order data by latest month orders (descending)
-            # # Find the current month key (the one ending with '_Current')
-            # def get_current_month_orders(entry):
-            #     for key, value in entry.items():
-            #         if key.endswith("_Current") and isinstance(value, int):
-            #             return value
-            #     return entry.get("total_orders", 0)
-
-            # monthly_order_data.sort(key=lambda x: -get_current_month_orders(x))
-
-            # # ========== PHASE 2: VOLUME DIP ANALYSIS FOR ALL CLIENTS ==========
-            # logger.info("Phase 2: Analyzing volume dips for all clients...")
-
-            # # Identify significant volume decreases from all clients
-            # volume_decreases = []
-            # critical_dips = []
-
-            # for client_data in all_clients_analysis:
-            #     significant_dip = False
-            #     dip_details = []
-
-            #     # Check recent 30-day vs previous 30-day comparison
-            #     if (
-            #         client_data.get("recent_vs_previous_30_days_change_percent")
-            #         and client_data["recent_vs_previous_30_days_change_percent"] < -30
-            #     ):
-            #         if (
-            #             client_data.get("orders_previous_30_days", 0) >= 30
-            #         ):  # Minimum baseline
-            #             significant_dip = True
-            #             dip_details.append(
-            #                 f"Recent vs Previous 30-day drop: {client_data['recent_vs_previous_30_days_change_percent']}% (from {client_data['orders_previous_30_days']} to {client_data['orders_last_30_days']})"
-            #             )
-
-            #     # Check monthly comparison
-            #     if (
-            #         client_data.get("current_vs_previous_month_change_percent")
-            #         and client_data["current_vs_previous_month_change_percent"] < -30
-            #     ):
-            #         # Get previous month orders from client's monthly data
-            #         client_monthly = next(
-            #             (
-            #                 m
-            #                 for m in monthly_order_data
-            #                 if m["client_id"] == client_data["client_id"]
-            #             ),
-            #             {},
-            #         )
-            #         # Find the previous month orders (first non-current month key)
-            #         prev_month_orders = 0
-            #         current_month_orders = 0
-            #         for key, value in client_monthly.items():
-            #             if "_Current" in key:
-            #                 current_month_orders = value
-            #             elif key not in [
-            #                 "client_id",
-            #                 "client_name",
-            #                 "total_orders",
-            #                 "avg_monthly_orders",
-            #             ] and isinstance(value, int):
-            #                 prev_month_orders = value
-            #                 break
-
-            #         if prev_month_orders >= 20:  # Minimum baseline
-            #             significant_dip = True
-            #             dip_details.append(
-            #                 f"Monthly drop: {client_data['current_vs_previous_month_change_percent']}% (from {prev_month_orders} to {current_month_orders})"
-            #             )
-
-            #     if significant_dip:
-            #         severity = "CRITICAL"
-            #         recent_vs_previous_change = client_data.get(
-            #             "recent_vs_previous_30_days_change_percent"
-            #         )
-            #         if recent_vs_previous_change and recent_vs_previous_change > -50:
-            #             severity = (
-            #                 "HIGH" if recent_vs_previous_change < -40 else "MEDIUM"
-            #             )
-
-            #         volume_decrease_entry = {
-            #             "client_id": client_data["client_id"],
-            #             "client_name": client_data["client_name"],
-            #             "client_code": client_data.get("client_code", ""),
-            #             "is_currently_inactive": client_data.get(
-            #                 "is_currently_inactive", False
-            #             ),
-            #             "orders_last_30_days": client_data.get(
-            #                 "orders_last_30_days", 0
-            #             ),
-            #             "orders_previous_30_days": client_data.get(
-            #                 "orders_previous_30_days", 0
-            #             ),
-            #             "recent_vs_previous_30_days_change_percent": client_data.get(
-            #                 "recent_vs_previous_30_days_change_percent"
-            #             ),
-            #             "current_vs_previous_month_change_percent": client_data.get(
-            #                 "current_vs_previous_month_change_percent"
-            #             ),
-            #             "avg_daily_orders_recent_30_days": client_data.get(
-            #                 "avg_daily_orders_recent_30_days", 0
-            #             ),
-            #             "avg_daily_orders_previous_30_days": client_data.get(
-            #                 "avg_daily_orders_previous_30_days", 0
-            #             ),
-            #             "total_orders": client_data.get("total_orders", 0),
-            #             "total_order_value": client_data.get("total_order_value", 0),
-            #             "severity": severity,
-            #             "dip_details": "; ".join(dip_details),
-            #         }
-
-            #         volume_decreases.append(volume_decrease_entry)
-
-            #         # If it's a critical dip (>60% decrease from high volume)
-            #         recent_vs_previous_change = client_data.get(
-            #             "recent_vs_previous_30_days_change_percent"
-            #         )
-            #         change_monthly = client_data.get(
-            #             "current_vs_previous_month_change_percent"
-            #         )
-            #         orders_previous_30 = client_data.get("orders_previous_30_days", 0)
-
-            #         if (
-            #             recent_vs_previous_change
-            #             and recent_vs_previous_change < -60
-            #             and orders_previous_30 >= 100
-            #         ) or (change_monthly and change_monthly < -60):
-            #             critical_dips.append(volume_decrease_entry)
-
-            # # Sort volume decreases by severity and percentage change
-            # volume_decreases.sort(
-            #     key=lambda x: (
-            #         {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 2}[x["severity"]],
-            #         x["recent_vs_previous_30_days_change_percent"] or 0,
-            #     )
-            # )
-
-            # volume_summary = {
-            #     "total_clients_analyzed": len(all_clients_analysis),
-            #     "clients_with_volume_decreases": len(volume_decreases),
-            #     "critical_volume_dips": len(critical_dips),
-            #     "inactive_clients": len(inactive_analysis),
-            # }
-
-            # # ========== PHASE 3: GENERATE INSIGHTS AND RECOMMENDATIONS ==========
-            # logger.info("Phase 3: Generating insights...")
-
-            # insights = []
-            # recommendations = []
-
-            # # High-risk inactive clients
-            # high_risk_count = risk_counts["HIGH"]
-            # if high_risk_count > 0:
-            #     insights.append(
-            #         f"{high_risk_count} high-value clients have become inactive - immediate attention required"
-            #     )
-            #     recommendations.append(
-            #         {
-            #             "priority": "CRITICAL",
-            #             "action": f"Contact {high_risk_count} high-value inactive clients within 24 hours",
-            #             "impact": "High revenue recovery potential",
-            #         }
-            #     )
-
-            # # Volume decreases (now from comprehensive analysis)
-            # volume_decrease_count = volume_summary["clients_with_volume_decreases"]
-            # critical_dip_count = volume_summary["critical_volume_dips"]
-
-            # if volume_decrease_count > 0:
-            #     insights.append(
-            #         f"{volume_decrease_count} clients show significant order volume decreases"
-            #     )
-            #     recommendations.append(
-            #         {
-            #             "priority": "HIGH",
-            #             "action": f"Investigate {volume_decrease_count} clients with volume decreases",
-            #             "impact": "Prevent further client churn and revenue loss",
-            #         }
-            #     )
-
-            # if critical_dip_count > 0:
-            #     insights.append(
-            #         f"{critical_dip_count} clients have CRITICAL volume dips (>60% decrease from high baseline)"
-            #     )
-            #     recommendations.append(
-            #         {
-            #             "priority": "CRITICAL",
-            #             "action": f"Emergency investigation for {critical_dip_count} clients with critical volume dips",
-            #             "impact": "Immediate revenue recovery - potential high-value client loss",
-            #         }
-            #     )
-
-            # # Volume drop analysis for active clients
-            # active_with_drops = len(
-            #     [
-            #         c
-            #         for c in all_clients_analysis
-            #         if not c["is_currently_inactive"] and c["volume_drop_risk"]
-            #     ]
-            # )
-            # if active_with_drops > 0:
-            #     insights.append(
-            #         f"{active_with_drops} currently ACTIVE clients show concerning volume drops"
-            #     )
-            #     recommendations.append(
-            #         {
-            #             "priority": "HIGH",
-            #             "action": f"Proactive engagement with {active_with_drops} active clients showing volume drops",
-            #             "impact": "Prevent active clients from becoming inactive",
-            #         }
-            #     )
-
-            # # Incomplete onboarding
-            # incomplete_onboarding = len(
-            #     [c for c in inactive_analysis if not c["is_onboarding_completed"]]
-            # )
-            # if incomplete_onboarding > 0:
-            #     insights.append(
-            #         f"{incomplete_onboarding} inactive clients have incomplete onboarding"
-            #     )
-            #     recommendations.append(
-            #         {
-            #             "priority": "MEDIUM",
-            #             "action": f"Complete onboarding for {incomplete_onboarding} clients",
-            #             "impact": "Improve client activation rate",
-            #         }
-            #     )
-
-            # # ========== PHASE 4: EXPORT TO EXCEL ==========
-            # logger.info("Phase 4: Exporting to Excel...")
-
-            # timestamp = current_time.strftime("%Y%m%d_%H%M%S")
-            # filename = f"comprehensive_client_analysis_{timestamp}.xlsx"
-            # filepath = os.path.join("uploads", filename)
-            # os.makedirs("uploads", exist_ok=True)
-
-            # try:
-            #     with pd.ExcelWriter(filepath, engine="openpyxl") as writer:
-            #         # Executive Summary
-            #         summary_data = [
-            #             [
-            #                 "Analysis Timestamp",
-            #                 current_time.strftime("%Y-%m-%d %H:%M:%S"),
-            #             ],
-            #             [
-            #                 "Total Clients Analyzed",
-            #                 volume_summary["total_clients_analyzed"],
-            #             ],
-            #             ["Total Inactive Clients", volume_summary["inactive_clients"]],
-            #             ["High Risk Inactive", risk_counts["HIGH"]],
-            #             ["Medium Risk Inactive", risk_counts["MEDIUM"]],
-            #             ["Low Risk Inactive", risk_counts["LOW"]],
-            #             [
-            #                 "Clients with Volume Decreases",
-            #                 volume_summary["clients_with_volume_decreases"],
-            #             ],
-            #             [
-            #                 "Critical Volume Dips",
-            #                 volume_summary["critical_volume_dips"],
-            #             ],
-            #             ["Analysis Period (Days)", inactive_days],
-            #         ]
-            #         pd.DataFrame(summary_data, columns=["Metric", "Value"]).to_excel(
-            #             writer, sheet_name="Executive_Summary", index=False
-            #         )
-
-            #         # High Priority Inactive
-            #         high_priority = [
-            #             c for c in inactive_analysis if c["risk_level"] == "HIGH"
-            #         ]
-            #         if high_priority:
-            #             pd.DataFrame(high_priority).to_excel(
-            #                 writer, sheet_name="High_Priority_Inactive", index=False
-            #             )
-
-            #         # All Inactive Clients
-            #         if inactive_analysis:
-            #             pd.DataFrame(inactive_analysis).to_excel(
-            #                 writer, sheet_name="All_Inactive_Clients", index=False
-            #             )
-
-            #         # All Clients Analysis (Active + Inactive)
-            #         if all_clients_analysis:
-            #             pd.DataFrame(all_clients_analysis).to_excel(
-            #                 writer, sheet_name="All_Clients_Analysis", index=False
-            #             )
-
-            #         # Monthly Order Counts Table
-            #         if monthly_order_data:
-            #             # Create a formatted monthly table with actual month names as columns
-            #             monthly_df = pd.DataFrame(monthly_order_data)
-
-            #             # The DataFrame will now have actual month names as columns (e.g., "2024-10_Current", "2024-09", "2024-08", etc.)
-            #             # Simply export it as is - the month names will be the column headers
-            #             monthly_df.to_excel(
-            #                 writer, sheet_name="Monthly_Order_Counts", index=False
-            #             )
-
-            #         # Volume Decreases (Enhanced)
-            #         if volume_decreases:
-            #             pd.DataFrame(volume_decreases).to_excel(
-            #                 writer, sheet_name="Volume_Decreases", index=False
-            #             )
-
-            #         # Critical Volume Dips (Separate sheet for urgent attention)
-            #         critical_volume_dips = [
-            #             v for v in volume_decreases if v["severity"] == "CRITICAL"
-            #         ]
-            #         if critical_volume_dips:
-            #             pd.DataFrame(critical_volume_dips).to_excel(
-            #                 writer, sheet_name="CRITICAL_Volume_Dips", index=False
-            #             )
-
-            #         # Recommendations
-            #         if recommendations:
-            #             pd.DataFrame(recommendations).to_excel(
-            #                 writer, sheet_name="Recommendations", index=False
-            #             )
-
-            #         # Key Insights
-            #         if insights:
-            #             pd.DataFrame({"Key_Insights": insights}).to_excel(
-            #                 writer, sheet_name="Key_Insights", index=False
-            #             )
-
-            #     logger.info(f"Analysis exported to: {filepath}")
-
-            # except Exception as e:
-            #     logger.error(f"Error exporting to Excel: {str(e)}")
-            #     filepath = None
-
-            # # ========== PHASE 5: LOG RESULTS ==========
-            # logger.info("=" * 80)
-            # logger.info("COMPREHENSIVE CLIENT ANALYSIS RESULTS")
-            # logger.info("=" * 80)
-            # logger.info(
-            #     f"Analysis completed at: {current_time.strftime('%Y-%m-%d %H:%M:%S')}"
-            # )
-            # logger.info(
-            #     f"Total clients analyzed: {volume_summary['total_clients_analyzed']} (excluding never-booked)"
-            # )
-            # logger.info(
-            #     f"Currently inactive clients: {volume_summary['inactive_clients']}"
-            # )
-            # logger.info(f"High risk inactive: {risk_counts['HIGH']}")
-            # logger.info(f"Medium risk inactive: {risk_counts['MEDIUM']}")
-            # logger.info(f"Low risk inactive: {risk_counts['LOW']}")
-            # logger.info(
-            #     f"Clients with volume decreases: {volume_summary['clients_with_volume_decreases']}"
-            # )
-            # logger.info(
-            #     f"CRITICAL volume dips: {volume_summary['critical_volume_dips']}"
-            # )
-            # logger.info(f"Excel report: {filepath}")
-
-            # logger.info("\nKEY INSIGHTS:")
-            # for i, insight in enumerate(insights, 1):
-            #     logger.info(f"{i}. {insight}")
-
-            # logger.info("\nIMMEDIATE ACTIONS REQUIRED:")
-            # for rec in recommendations:
-            #     logger.info(f"• {rec['priority']}: {rec['action']}")
-
-            # # Log top volume dips for immediate attention
-            # if volume_decreases:
-            #     logger.info(f"\nTOP 5 VOLUME DIPS:")
-            #     for i, dip in enumerate(volume_decreases[:5], 1):
-            #         logger.info(
-            #             f"{i}. {dip['client_name']} (ID: {dip['client_id']}) - {dip['severity']}"
-            #         )
-            #         logger.info(f"   {dip['dip_details']}")
-
-            # logger.info("=" * 80)
-
-            # # Return comprehensive results
-            # return GenericResponseModel(
-            #     status_code=http.HTTPStatus.OK,
-            #     message=f"Comprehensive client analysis completed. Analyzed {volume_summary['total_clients_analyzed']} clients, found {volume_summary['inactive_clients']} inactive clients and {volume_summary['clients_with_volume_decreases']} clients with volume decreases.",
-            #     status=True,
-            #     data={
-            #         "analysis_timestamp": current_time.strftime("%Y-%m-%d %H:%M:%S"),
-            #         "summary": {
-            #             "total_clients_analyzed": volume_summary[
-            #                 "total_clients_analyzed"
-            #             ],
-            #             "inactive_clients": volume_summary["inactive_clients"],
-            #             "high_risk_inactive": risk_counts["HIGH"],
-            #             "medium_risk_inactive": risk_counts["MEDIUM"],
-            #             "low_risk_inactive": risk_counts["LOW"],
-            #             "clients_with_volume_decreases": volume_summary[
-            #                 "clients_with_volume_decreases"
-            #             ],
-            #             "critical_volume_dips": volume_summary["critical_volume_dips"],
-            #         },
-            #         "high_priority_inactive": [
-            #             c for c in inactive_analysis if c["risk_level"] == "HIGH"
-            #         ][:10],
-            #         "critical_volume_dips": [
-            #             v for v in volume_decreases if v["severity"] == "CRITICAL"
-            #         ][:10],
-            #         "top_volume_decreases": volume_decreases[:10],
-            #         "clients_with_volume_drops": [
-            #             c for c in all_clients_analysis if c["volume_drop_risk"]
-            #         ][:10],
-            #         "key_insights": insights,
-            #         "recommendations": recommendations,
-            #         "excel_report_path": filepath,
-            #     },
-            # )
-
-            # return
-
-            company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
 
             # Find the existing order from the db
@@ -2849,7 +727,6 @@ class OrderService:
                 db.query(Order)
                 .filter(
                     Order.order_id == order_id,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                 )
                 .first()
@@ -2878,7 +755,6 @@ class OrderService:
                 db.query(Order)
                 .filter(
                     Order.order_id == new_order_id,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                 )
                 .first()
@@ -2890,23 +766,81 @@ class OrderService:
                     message="Duplicate order ID generated. Please try again.",
                 )
 
+            from models.order_item import OrderItem
+            from models.order_audit_log import OrderAuditLog
+
+            user_id = context_user_data.get().id
+            user_name = context_user_data.get().name
+
             order_dict = order.__dict__.copy()
 
+            # Remove SQLAlchemy internal state and fields that shouldn't be copied
+            order_dict.pop("_sa_instance_state", None)
+            order_dict.pop("id", None)
+            order_dict.pop("uuid", None)
+            order_dict.pop("created_at", None)
+            order_dict.pop("updated_at", None)
+
             validated_order_data = cloneOrderModel(**order_dict)
-            # Remove courier field if it exists to avoid conflicts
+            # Remove fields that don't exist on Order model
             validated_data_dict = validated_order_data.model_dump()
-            if "courier" in validated_data_dict:
-                del validated_data_dict["courier"]
+            validated_data_dict.pop("products", None)
+            validated_data_dict.pop("courier", None)
+
             cloned_order = Order(**validated_data_dict)
 
             cloned_order.order_id = new_order_id
             cloned_order.status = "new"
             cloned_order.sub_status = "new"
-            cloned_order.tracking_info = []
-            cloned_order.action_history = []
+
+            # Clear shipment-related fields
+            cloned_order.awb_number = None
+            cloned_order.courier_partner = None
+            cloned_order.aggregator = None
+            cloned_order.shipping_partner_order_id = None
+            cloned_order.shipping_partner_shipping_id = None
+            cloned_order.label_url = None
+            cloned_order.manifest_url = None
+            cloned_order.invoice_url = None
+            cloned_order.is_label_generated = False
 
             # Add the cloned order to the database
             db.add(cloned_order)
+            db.flush()  # Get the ID
+
+            # Clone order items from original order
+            original_items = (
+                db.query(OrderItem)
+                .filter(
+                    OrderItem.order_id == order.id,
+                    OrderItem.is_deleted == False,
+                )
+                .all()
+            )
+
+            if original_items:
+                cloned_items = []
+                for item in original_items:
+                    cloned_item = OrderItem(
+                        order_id=cloned_order.id,
+                        name=item.name,
+                        sku_code=item.sku_code,
+                        quantity=item.quantity,
+                        unit_price=item.unit_price,
+                        product_id=item.product_id,
+                    )
+                    cloned_items.append(cloned_item)
+                db.add_all(cloned_items)
+
+            # Create audit log entry
+            audit_log = OrderAuditLog.log_order_cloned(
+                order_id=cloned_order.id,
+                source_order_id=order_id,
+                user_id=user_id,
+                user_name=user_name,
+            )
+            db.add(audit_log)
+
             db.commit()
 
             return GenericResponseModel(
@@ -2943,20 +877,23 @@ class OrderService:
 
     @staticmethod
     def cancel_order(order_id: str):
+        """Cancel an order. Only orders with status 'new' can be cancelled."""
+        from models.order_audit_log import OrderAuditLog
 
         try:
             with get_db_session() as db:
 
-                company_id = context_user_data.get().company_id
                 client_id = context_user_data.get().client_id
+                user_id = context_user_data.get().id
+                user_name = context_user_data.get().name
 
                 # Find the existing order from the db
                 order = (
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
+                        Order.is_deleted == False,
                     )
                     .first()
                 )
@@ -2977,6 +914,15 @@ class OrderService:
                 # update the status
                 order.status = "cancelled"
                 order.sub_status = "cancelled"
+                order.cancel_count = (order.cancel_count or 0) + 1
+
+                # Create audit log entry
+                audit_log = OrderAuditLog.log_order_cancelled(
+                    order_id=order.id,
+                    user_id=user_id,
+                    user_name=user_name,
+                )
+                db.add(audit_log)
 
                 # Commit the updated order to the database
                 db.add(order)
@@ -3036,7 +982,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -3191,7 +1136,6 @@ class OrderService:
                         db.query(Order.order_id)
                         .filter(
                             Order.order_id.in_(chunk_ids),
-                            Order.company_id == company_id,
                             Order.client_id == client_id,
                         )
                         .all()
@@ -3269,18 +1213,9 @@ class OrderService:
             # Pre-compile validation constants
             VALIDATION_CONSTANTS = {
                 "client_id": client_id,
-                "company_id": company_id,
-                "order_type": "B2C",
                 "status": "new",
                 "sub_status": "new",
                 "current_timestamp": current_timestamp,
-                "action_history": [
-                    {
-                        "timestamp": current_timestamp,
-                        "message": "Order Created on Platform",
-                        "user_data": "",
-                    }
-                ],
             }  # Progress tracking for validation
             orders_processed = 0
             validation_errors_count = 0
@@ -3326,7 +1261,6 @@ class OrderService:
                         "payment_mode",
                         "total_amount",
                         "order_value",
-                        "products",
                         "length",
                         "breadth",
                         "height",
@@ -3455,25 +1389,13 @@ class OrderService:
                         )
                         continue
 
-                    # OPTIMIZATION 8: Fast product quantity calculation
-                    try:
-                        products = order_dict.get("products", [])
-                        product_quantity = (
-                            sum(p.get("quantity", 0) for p in products)
-                            if products
-                            else 1
-                        )
-                    except (TypeError, AttributeError):
-                        product_quantity = 1
-
-                    # OPTIMIZATION 9: Bulk update with pre-computed constants
+                    # OPTIMIZATION 8: Bulk update with pre-computed constants
                     order_dict.update(VALIDATION_CONSTANTS)
                     order_dict.update(
                         {
                             "zone": zone,
                             "applicable_weight": applicable_weight,
                             "volumetric_weight": volumetric_weight,
-                            "product_quantity": product_quantity,
                         }
                     )
 
@@ -3552,13 +1474,6 @@ class OrderService:
                                 import json
                                 import uuid
 
-                                action_history_json = json.dumps(
-                                    order_dict.get("action_history", [])
-                                )
-                                order_tags_json = json.dumps(
-                                    order_dict.get("order_tags", [])
-                                )
-
                                 # Helper function to safely convert to float
                                 def safe_float(value, default=None):
                                     if value is None or value == "":
@@ -3577,32 +1492,6 @@ class OrderService:
                                     except (ValueError, TypeError):
                                         return default
 
-                                # Clean products: ensure numeric types for quantity and unit_price
-                                raw_products = order_dict.get("products", []) or []
-                                cleaned_products = []
-                                computed_product_quantity = 0
-                                for prod in raw_products:
-                                    try:
-                                        # Work on a shallow copy to avoid mutating input unexpectedly
-                                        p = dict(prod)
-                                        qty = safe_int(p.get("quantity"), 0)
-                                        price = safe_float(p.get("unit_price"), None)
-                                        p["quantity"] = qty
-                                        # Only set unit_price if it's present or convertible
-                                        if price is not None:
-                                            # Format to a float (keeps numeric type in JSON)
-                                            p["unit_price"] = price
-                                        else:
-                                            # Remove empty unit_price to avoid storing as empty string
-                                            p.pop("unit_price", None)
-                                        cleaned_products.append(p)
-                                        computed_product_quantity += qty
-                                    except Exception:
-                                        # Fallback: keep original product if cleaning fails for this item
-                                        cleaned_products.append(prod)
-
-                                products_json = json.dumps(cleaned_products)
-
                                 # Prepare the insert tuple with all required fields
                                 insert_values.append(
                                     (
@@ -3610,10 +1499,8 @@ class OrderService:
                                         uuid.uuid4(),  # uuid
                                         # Basic order info
                                         str(order_dict.get("order_id", "")),
-                                        str(order_dict.get("order_type", "B2C")),
                                         order_date_str,
                                         order_dict.get("channel"),
-                                        safe_int(order_dict.get("company_id")),
                                         safe_int(order_dict.get("client_id")),
                                         # Consignee details
                                         str(order_dict.get("consignee_full_name", "")),
@@ -3631,7 +1518,7 @@ class OrderService:
                                         # Billing details
                                         bool(
                                             order_dict.get(
-                                                "billing_is_same_as_consignee", True
+                                                "is_billing_same_as_consignee", True
                                             )
                                         ),
                                         order_dict.get("billing_full_name"),
@@ -3659,9 +1546,7 @@ class OrderService:
                                         order_dict.get("invoice_date"),
                                         safe_float(order_dict.get("invoice_amount")),
                                         order_dict.get("eway_bill_number"),
-                                        # Products and package
-                                        products_json,
-                                        safe_int(order_dict.get("product_quantity"), 1),
+                                        # Package dimensions
                                         safe_float(order_dict.get("length"), 0.0),
                                         safe_float(order_dict.get("breadth"), 0.0),
                                         safe_float(order_dict.get("height"), 0.0),
@@ -3676,9 +1561,6 @@ class OrderService:
                                         str(order_dict.get("zone", "")),
                                         str(order_dict.get("status", "new")),
                                         str(order_dict.get("sub_status", "new")),
-                                        # JSON fields
-                                        action_history_json,
-                                        order_tags_json,
                                         # Default values
                                         0,  # clone_order_count
                                         0,  # cancel_count
@@ -3731,17 +1613,17 @@ class OrderService:
                                 # Build the complete bulk insert SQL
                                 bulk_insert_sql = f"""
                                 INSERT INTO "order" (
-                                    uuid, order_id, order_type, order_date, channel, company_id, client_id,
+                                    uuid, order_id, order_date, channel, client_id,
                                     consignee_full_name, consignee_phone, consignee_alternate_phone, consignee_email,
                                     consignee_company, consignee_gstin, consignee_address, consignee_landmark,
                                     consignee_pincode, consignee_city, consignee_state, consignee_country,
-                                    billing_is_same_as_consignee, billing_full_name, billing_phone, billing_email,
+                                    is_billing_same_as_consignee, billing_full_name, billing_phone, billing_email,
                                     billing_address, billing_landmark, billing_pincode, billing_city, billing_state, billing_country,
                                     pickup_location_code, payment_mode, total_amount, order_value,
                                     shipping_charges, cod_charges, discount, gift_wrap_charges, other_charges, tax_amount,
                                     invoice_number, invoice_date, invoice_amount, eway_bill_number,
-                                    products, product_quantity, length, breadth, height, weight, applicable_weight, volumetric_weight,
-                                    zone, status, sub_status, action_history, order_tags,
+                                    length, breadth, height, weight, applicable_weight, volumetric_weight,
+                                    zone, status, sub_status,
                                     clone_order_count, cancel_count, is_label_generated, is_deleted, created_at, updated_at, last_update_date
                                 ) VALUES {', '.join(values_placeholders)}
                                 """
@@ -4139,12 +2021,11 @@ class OrderService:
 
             db = get_db_session()
 
-            company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
 
             # Build base filters that apply to all queries
+            # Note: company_id removed from Order model - using client_id only
             base_filters = [
-                Order.company_id == company_id,
                 Order.client_id == client_id,
                 Order.is_deleted == False,
             ]
@@ -4186,9 +2067,6 @@ class OrderService:
                     ]
                 )
 
-            # Initialize sku_params for parameter binding
-            sku_params = {}
-
             # Remaining filters (applied to main query and count query)
             remaining_filters = []
 
@@ -4196,26 +2074,38 @@ class OrderService:
                 remaining_filters.append(Order.sub_status == current_status)
 
             if sku_codes:
-                sku_codes = [term.strip() for term in sku_codes.split(",")]
-                like_conditions = [
-                    text(
-                        f"EXISTS (SELECT 1 FROM jsonb_array_elements(products) AS elem WHERE elem->>'sku_code' ILIKE :sku_{i})"
-                    )
-                    for i, sku in enumerate(sku_codes)
+                sku_codes_list = [term.strip() for term in sku_codes.split(",")]
+                # Use EXISTS subquery to filter orders by SKU code in order_item table
+                sku_conditions = [
+                    OrderItem.sku_code.ilike(f"%{sku}%") for sku in sku_codes_list
                 ]
-                sku_filter = or_(*like_conditions)
-                remaining_filters.append(sku_filter)
-
-                # Store parameters for later use
-                sku_params = {f"sku_{i}": f"%{sku}%" for i, sku in enumerate(sku_codes)}
+                sku_exists = (
+                    db.query(OrderItem.id)
+                    .filter(
+                        OrderItem.order_id == Order.id,
+                        or_(*sku_conditions),
+                        OrderItem.is_deleted == False,
+                    )
+                    .exists()
+                )
+                remaining_filters.append(sku_exists)
 
             if product_name:
                 product_names = [term.strip() for term in product_name.split(",")]
-                name_filters = [
-                    cast(Order.products, String).ilike(f'%"name": "%{name.strip()}%"%')
-                    for name in product_names
+                # Use EXISTS subquery to filter orders by product name in order_item table
+                name_conditions = [
+                    OrderItem.name.ilike(f"%{name}%") for name in product_names
                 ]
-                remaining_filters.append(or_(*name_filters))
+                name_exists = (
+                    db.query(OrderItem.id)
+                    .filter(
+                        OrderItem.order_id == Order.id,
+                        or_(*name_conditions),
+                        OrderItem.is_deleted == False,
+                    )
+                    .exists()
+                )
+                remaining_filters.append(name_exists)
 
             if pincode:
                 pincodes = [term.strip() for term in pincode.split(",")]
@@ -4237,11 +2127,22 @@ class OrderService:
                 remaining_filters.append(Order.courier_partner == courier_filter)
 
             if product_quantity:
-                remaining_filters.append(Order.product_quantity == product_quantity)
+                # Use scalar subquery to filter orders by total product quantity from order_item table
+                qty_scalar = (
+                    db.query(func.coalesce(func.sum(OrderItem.quantity), 0))
+                    .filter(
+                        OrderItem.order_id == Order.id,
+                        OrderItem.is_deleted == False,
+                    )
+                    .correlate(Order)
+                    .scalar_subquery()
+                )
+                remaining_filters.append(qty_scalar == product_quantity)
 
-            if tags and len(tags) > 0:
-                tag_filter = cast(Order.order_tags, String).ilike(f"%{tags.strip()}%")
-                remaining_filters.append(tag_filter)
+            # Note: order_tags filter temporarily disabled - tags moved to separate table
+            # if tags and len(tags) > 0:
+            #     tag_filter = cast(Order.order_tags, String).ilike(f"%{tags.strip()}%")
+            #     remaining_filters.append(tag_filter)
 
             # Repeat customer filter - if filter is on, only repeat customers, otherwise all
             if repeat_customer is True:
@@ -4249,7 +2150,6 @@ class OrderService:
                 repeat_customer_subquery = (
                     db.query(Order.consignee_phone)
                     .filter(
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                         Order.consignee_phone.isnot(None),
@@ -4273,12 +2173,7 @@ class OrderService:
             status_count_query = status_count_query.filter(*remaining_filters)
 
             # Get status counts optimized - count by status without loading data
-            status_count_query_final = status_count_query
-
-            if sku_codes:
-                status_count_query_final = status_count_query_final.params(**sku_params)
-
-            status_counts_result = status_count_query_final.group_by(Order.status).all()
+            status_counts_result = status_count_query.group_by(Order.status).all()
             status_counts = {status: count for status, count in status_counts_result}
 
             # Get total count for "all" status
@@ -4290,9 +2185,6 @@ class OrderService:
             main_query = main_query.filter(*base_filters)
             main_query = main_query.filter(*common_filters)
             main_query = main_query.filter(*remaining_filters)
-
-            if sku_codes:
-                main_query = main_query.params(**sku_params)
 
             # Apply status filter to main query only
             if order_status != "all":
@@ -4311,9 +2203,6 @@ class OrderService:
                 Order.courier_partner.isnot(None), Order.courier_partner != ""
             ).distinct()
 
-            if sku_codes:
-                courier_query = courier_query.params(**sku_params)
-
             distinct_courier_partners = [partner[0] for partner in courier_query.all()]
 
             # Get total count for pagination
@@ -4326,8 +2215,11 @@ class OrderService:
             offset_value = (page_number - 1) * batch_size
             main_query = main_query.offset(offset_value).limit(batch_size)
 
-            # Execute main query with joinedload for pickup_location
-            fetched_orders = main_query.options(joinedload(Order.pickup_location)).all()
+            # Execute main query with joinedload for pickup_location and selectinload for items
+            fetched_orders = main_query.options(
+                joinedload(Order.pickup_location),
+                selectinload(Order.items),
+            ).all()
 
             ####### REPEAT CUSTOMER LOGIC #######
 
@@ -4345,7 +2237,6 @@ class OrderService:
                     db.query(Order.consignee_phone, func.count(Order.id))
                     .filter(
                         Order.consignee_phone.in_(phone_numbers),
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                     )
@@ -4360,7 +2251,62 @@ class OrderService:
             # Convert orders to response format
             fetched_orders_response = []
             for order in fetched_orders:
-                order_dict = order.to_model().model_dump()
+                # Build response dict from order attributes
+                order_dict = {
+                    "id": order.id,
+                    "uuid": order.uuid,
+                    "order_id": order.order_id,
+                    "order_date": order.order_date,
+                    "channel": order.channel,
+                    "client_id": order.client_id,
+                    # Consignee
+                    "consignee_full_name": order.consignee_full_name,
+                    "consignee_phone": order.consignee_phone,
+                    "consignee_email": order.consignee_email,
+                    "consignee_address": order.consignee_address,
+                    "consignee_pincode": order.consignee_pincode,
+                    "consignee_city": order.consignee_city,
+                    "consignee_state": order.consignee_state,
+                    "consignee_country": order.consignee_country,
+                    # Payment
+                    "payment_mode": order.payment_mode,
+                    "total_amount": float(order.total_amount or 0),
+                    "order_value": float(order.order_value or 0),
+                    "cod_to_collect": float(order.cod_to_collect or 0),
+                    # Package
+                    "weight": float(order.weight or 0),
+                    "applicable_weight": float(order.applicable_weight or 0),
+                    "volumetric_weight": float(order.volumetric_weight or 0),
+                    "length": float(order.length or 0),
+                    "breadth": float(order.breadth or 0),
+                    "height": float(order.height or 0),
+                    # Shipment
+                    "status": order.status,
+                    "sub_status": order.sub_status,
+                    "awb_number": order.awb_number,
+                    "courier_partner": order.courier_partner,
+                    "zone": order.zone,
+                    # Pickup
+                    "pickup_location_code": order.pickup_location_code,
+                    "pickup_location": serialize_pickup_location(order.pickup_location),
+                    # Dates
+                    "booking_date": order.booking_date,
+                    "delivered_date": order.delivered_date,
+                    "edd": order.edd,
+                    "created_at": order.created_at,
+                    # Items - convert from relationship to response format
+                    "items": [
+                        OrderItemResponse(
+                            id=item.id,
+                            name=item.name,
+                            sku_code=item.sku_code,
+                            quantity=item.quantity,
+                            unit_price=float(item.unit_price or 0),
+                        )
+                        for item in (order.items or [])
+                        if not getattr(item, "is_deleted", False)
+                    ],
+                }
 
                 # Get actual previous order count for this phone number
                 phone = order.consignee_phone
@@ -4408,23 +2354,12 @@ class OrderService:
                 db.close()
 
     @staticmethod
-    def dev_cancel_awbs():
-
-        time.sleep(3)
-        return GenericResponseModel(
-            status=True,
-            status_code=http.HTTPStatus.OK,
-            message="cancelled successfully",
-        )
-
-    @staticmethod
     def get_previous_orders(order_id: str, page_number: int = 1, batch_size: int = 10):
         """
         Get previous orders for the same phone number as the given order ID with pagination
         """
         try:
             with get_db_session() as db:
-                company_id = context_user_data.get().company_id
                 client_id = context_user_data.get().client_id
 
                 # First, get the current order to extract the phone number
@@ -4432,7 +2367,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_id,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                     )
@@ -4456,7 +2390,6 @@ class OrderService:
                 # Build base query for previous orders
                 base_query = db.query(Order).filter(
                     Order.consignee_phone == current_order.consignee_phone,
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                     Order.is_deleted == False,
                     Order.order_id != order_id,  # Exclude current order
@@ -4467,7 +2400,6 @@ class OrderService:
                     db.query(Order.status, func.count(Order.id))
                     .filter(
                         Order.consignee_phone == current_order.consignee_phone,
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.is_deleted == False,
                         Order.order_id != order_id,  # Exclude current order
@@ -4504,7 +2436,10 @@ class OrderService:
                 # Apply pagination and sorting
                 offset_value = (page_number - 1) * batch_size
                 previous_orders = (
-                    base_query.options(joinedload(Order.pickup_location))
+                    base_query.options(
+                        joinedload(Order.pickup_location),
+                        selectinload(Order.items),
+                    )
                     .order_by(
                         desc(Order.order_date), desc(Order.created_at), desc(Order.id)
                     )
@@ -4516,7 +2451,63 @@ class OrderService:
                 # Convert to response format
                 previous_orders_response = []
                 for order in previous_orders:
-                    order_dict = order.to_model().model_dump()
+                    order_dict = {
+                        "id": order.id,
+                        "uuid": order.uuid,
+                        "order_id": order.order_id,
+                        "order_date": order.order_date,
+                        "channel": order.channel,
+                        "client_id": order.client_id,
+                        # Consignee
+                        "consignee_full_name": order.consignee_full_name,
+                        "consignee_phone": order.consignee_phone,
+                        "consignee_email": order.consignee_email,
+                        "consignee_address": order.consignee_address,
+                        "consignee_pincode": order.consignee_pincode,
+                        "consignee_city": order.consignee_city,
+                        "consignee_state": order.consignee_state,
+                        "consignee_country": order.consignee_country,
+                        # Payment
+                        "payment_mode": order.payment_mode,
+                        "total_amount": float(order.total_amount or 0),
+                        "order_value": float(order.order_value or 0),
+                        "cod_to_collect": float(order.cod_to_collect or 0),
+                        # Package
+                        "weight": float(order.weight or 0),
+                        "applicable_weight": float(order.applicable_weight or 0),
+                        "volumetric_weight": float(order.volumetric_weight or 0),
+                        "length": float(order.length or 0),
+                        "breadth": float(order.breadth or 0),
+                        "height": float(order.height or 0),
+                        # Shipment
+                        "status": order.status,
+                        "sub_status": order.sub_status,
+                        "awb_number": order.awb_number,
+                        "courier_partner": order.courier_partner,
+                        "zone": order.zone,
+                        # Pickup
+                        "pickup_location_code": order.pickup_location_code,
+                        "pickup_location": serialize_pickup_location(
+                            order.pickup_location
+                        ),
+                        # Dates
+                        "booking_date": order.booking_date,
+                        "delivered_date": order.delivered_date,
+                        "edd": order.edd,
+                        "created_at": order.created_at,
+                        # Items - convert from relationship to response format
+                        "items": [
+                            OrderItemResponse(
+                                id=item.id,
+                                name=item.name,
+                                sku_code=item.sku_code,
+                                quantity=item.quantity,
+                                unit_price=float(item.unit_price or 0),
+                            )
+                            for item in (order.items or [])
+                            if not getattr(item, "is_deleted", False)
+                        ],
+                    }
                     previous_orders_response.append(Order_Response_Model(**order_dict))
 
                 # Calculate pagination info
@@ -4574,30 +2565,25 @@ class OrderService:
 
         try:
 
-            print("inside")
-
             db = get_db_session()
 
             company_id = context_user_data.get().company_id
             client_id = context_user_data.get().client_id
 
-            print(phone)
-
-            # query the db for fetching the orders
+            # query the db for fetching the latest 3 orders with distinct addresses
 
             customers = (
                 db.query(Order)
+                .options(selectinload(Order.items))
                 .filter(
                     Order.client_id == client_id,
                     Order.consignee_phone == phone,
                 )
                 .distinct(Order.consignee_address)
+                .order_by(asc(Order.consignee_address), desc(Order.created_at))
+                .limit(3)
                 .all()
             )
-
-            print(customers)
-
-            # applying company and client filter
 
             customer_data = [
                 customerResponseModel(
@@ -4638,10 +2624,6 @@ class OrderService:
                 message="An internal server error occurred. Please try again later.",
             )
 
-        finally:
-            if db:
-                db.close()
-
     @staticmethod
     def export_orders(order_filters: Order_filters):
 
@@ -4674,7 +2656,6 @@ class OrderService:
 
             else:
                 query = query.filter(
-                    Order.company_id == company_id,
                     Order.client_id == client_id,
                     Order.is_deleted == False,
                 )
@@ -5338,11 +3319,10 @@ class OrderService:
 
             # query the db for fetching the orders
 
-            query = db.query(Order)
+            query = db.query(Order).options(selectinload(Order.items))
 
             # # applying company and client filter
             fetched_orders = query.filter(
-                Order.company_id == company_id,
                 Order.client_id == client_id,
                 Order.cod_remittance_cycle_id == cycle_id,
             ).all()
@@ -5514,12 +3494,17 @@ class OrderService:
                 order_data = (
                     db.query(Order)
                     .filter(
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.order_id == order_id,
                         Order.is_deleted == False,
                     )
-                    .options(joinedload(Order.pickup_location))
+                    .options(
+                        joinedload(Order.pickup_location),
+                        selectinload(Order.items),
+                        selectinload(Order.tracking_events),
+                        selectinload(Order.audit_logs),
+                        joinedload(Order.billing),
+                    )
                     .first()
                 )
 
@@ -5712,7 +3697,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id == order_data["order_id"],
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                     )
                     .first()
@@ -5747,11 +3731,6 @@ class OrderService:
                 print(3)
 
                 order_data["client_id"] = client_id
-                order_data["company_id"] = company_id
-
-                # adding the extra default details to the order
-
-                order_data["order_type"] = "B2C"
 
                 # round the volumetric weight to 3 decimal places
                 volumetric_weight = round(
@@ -5963,27 +3942,35 @@ class OrderService:
                     }
                 }
 
+                # TODO: This legacy WooCommerce integration needs to be updated
+                # to use client_id instead of company_id (which was removed from Order model)
+                # For now, this method is not functional
                 existing_order = (
                     db.query(Order)
                     .filter(
-                        Order.company_id == str(request["com_id"]),
-                        Order.order_id == str(request["id"]),
+                        # Order.company_id == str(request["com_id"]),  # REMOVED - company_id no longer exists
+                        Order.order_id
+                        == str(request["id"]),
                     )
                     .first()
                 )
 
+                from models.order_audit_log import OrderAuditLog
+
                 if existing_order:
                     # If the order exists, update its attributes
+                    # Filter out products as it's stored in separate table
                     for key, value in newOrder.items():
-                        setattr(existing_order, key, value)
+                        if key != "products" and hasattr(existing_order, key):
+                            setattr(existing_order, key, value)
 
-                    # Update the tracking info
-                    existing_order.tracking_info.append(
-                        {
-                            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                            "event": "Order Updated on Platform",
-                        }
+                    # Add audit log entry
+                    audit_log = OrderAuditLog.log_order_updated(
+                        order_id=existing_order.id,
+                        user_id=None,
+                        user_name="WooCommerce Sync",
                     )
+                    db.add(audit_log)
 
                     # Commit the changes to the database
                     db.commit()
@@ -5993,16 +3980,24 @@ class OrderService:
                     }  # Return the updated order
                 else:
                     # If the order does not exist, create a new one
-
-                    final = Order(**{**newOrder, "status": "New"})
-                    final.tracking_info = [
-                        {
-                            "date": datetime.now().strftime("%d/%m/%Y %H:%M"),
-                            "event": "Order Created on Platform",
-                        }
-                    ]
+                    # Remove products from order data (stored in separate table)
+                    order_data_for_db = {
+                        k: v for k, v in newOrder.items() if k != "products"
+                    }
+                    final = Order(**{**order_data_for_db, "status": "New"})
 
                     db.add(final)
+                    db.flush()
+
+                    # Add audit log entry
+                    audit_log = OrderAuditLog.log_order_created(
+                        order_id=final.id,
+                        user_id=None,
+                        user_name="WooCommerce Sync",
+                        source="woocommerce",
+                    )
+                    db.add(audit_log)
+
                     db.commit()
 
                 return {"code": 200, "message": "Order Created"}
@@ -6066,7 +4061,6 @@ class OrderService:
                     db.query(Order)
                     .filter(
                         Order.order_id.in_(order_ids),
-                        Order.company_id == company_id,
                         Order.client_id == client_id,
                         Order.status == "new",
                     )

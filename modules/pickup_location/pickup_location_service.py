@@ -8,7 +8,10 @@ from context_manager.context import context_user_data, get_db_session
 from logger import logger
 
 # models
-from models import Pickup_Location, Order, ActivityLog
+from models import Pickup_Location, Order
+
+# utils
+from utils.log_handler import ActivityLogHandler
 
 # schema
 from schema.base import GenericResponseModel
@@ -20,43 +23,38 @@ from .pickup_location_schema import (
 )
 
 
+def serialize_pickup_location(pickup_location):
+    """
+    Convert Pickup_Location SQLAlchemy model to a serializable dict.
+    Returns None if pickup_location is None.
+    """
+    if pickup_location is None:
+        return None
+
+    return {
+        "location_code": pickup_location.location_code,
+        "location_name": pickup_location.location_name,
+        "contact_person_name": pickup_location.contact_person_name,
+        "contact_person_phone": pickup_location.contact_person_phone,
+        "contact_person_email": pickup_location.contact_person_email,
+        "alternate_phone": pickup_location.alternate_phone,
+        "address": pickup_location.address,
+        "landmark": pickup_location.landmark,
+        "pincode": pickup_location.pincode,
+        "city": pickup_location.city,
+        "state": pickup_location.state,
+        "country": pickup_location.country,
+        "location_type": pickup_location.location_type,
+        "active": pickup_location.active,
+        "is_default": pickup_location.is_default,
+    }
+
+
 class PickupLocationService:
     """Service class for managing pickup locations"""
 
     # Entity type for activity logging
     ENTITY_TYPE = "pickup_location"
-
-    @staticmethod
-    def _log_activity(
-        db,
-        action: str,
-        entity_id: str,
-        client_id: int,
-        user_id: int = None,
-        user_email: str = None,
-        old_value: dict = None,
-        new_value: dict = None,
-        description: str = None,
-    ):
-        """Helper method to log activity"""
-        try:
-            activity_log = ActivityLog(
-                entity_type=PickupLocationService.ENTITY_TYPE,
-                entity_id=entity_id,
-                action=action,
-                client_id=client_id,
-                user_id=user_id,
-                user_email=user_email,
-                old_value=old_value,
-                new_value=new_value,
-                description=description,
-            )
-            db.add(activity_log)
-        except Exception as e:
-            logger.error(
-                extra=context_user_data.get(),
-                msg=f"Failed to log activity: {str(e)}",
-            )
 
     @staticmethod
     def _location_to_dict(location: Pickup_Location) -> dict:
@@ -152,10 +150,11 @@ class PickupLocationService:
                     db.add(current_default)
 
                     # Log the default removal
-                    PickupLocationService._log_activity(
+                    ActivityLogHandler.log(
                         db=db,
-                        action="REMOVE_DEFAULT",
+                        entity_type=PickupLocationService.ENTITY_TYPE,
                         entity_id=current_default.location_code,
+                        action=ActivityLogHandler.ACTION_REMOVE_DEFAULT,
                         client_id=client_id,
                         user_id=user_id,
                         user_email=user_email,
@@ -172,14 +171,14 @@ class PickupLocationService:
             db.flush()
 
             # Log the creation
-            PickupLocationService._log_activity(
+            ActivityLogHandler.log(
                 db=db,
-                action="CREATE",
+                entity_type=PickupLocationService.ENTITY_TYPE,
                 entity_id=location_code,
+                action=ActivityLogHandler.ACTION_CREATE,
                 client_id=client_id,
                 user_id=user_id,
                 user_email=user_email,
-                old_value=None,
                 new_value=location_data,
                 description=f"Created pickup location '{location_data['location_name']}'",
             )
@@ -280,10 +279,11 @@ class PickupLocationService:
                 db.add(current_default)
 
                 # Log the default removal
-                PickupLocationService._log_activity(
+                ActivityLogHandler.log(
                     db=db,
-                    action="REMOVE_DEFAULT",
+                    entity_type=PickupLocationService.ENTITY_TYPE,
                     entity_id=current_default.location_code,
+                    action=ActivityLogHandler.ACTION_REMOVE_DEFAULT,
                     client_id=client_id,
                     user_id=user_id,
                     user_email=user_email,
@@ -298,10 +298,11 @@ class PickupLocationService:
             db.flush()
 
             # Log the new default
-            PickupLocationService._log_activity(
+            ActivityLogHandler.log(
                 db=db,
-                action="SET_DEFAULT",
+                entity_type=PickupLocationService.ENTITY_TYPE,
                 entity_id=pickup_location_id,
+                action=ActivityLogHandler.ACTION_SET_DEFAULT,
                 client_id=client_id,
                 user_id=user_id,
                 user_email=user_email,
@@ -385,10 +386,11 @@ class PickupLocationService:
             status_text = "enabled" if new_status else "disabled"
 
             # Log the status change
-            PickupLocationService._log_activity(
+            ActivityLogHandler.log(
                 db=db,
-                action="TOGGLE_STATUS",
+                entity_type=PickupLocationService.ENTITY_TYPE,
                 entity_id=pickup_location_id,
+                action=ActivityLogHandler.ACTION_TOGGLE_STATUS,
                 client_id=client_id,
                 user_id=user_id,
                 user_email=user_email,
@@ -496,10 +498,11 @@ class PickupLocationService:
             new_value = PickupLocationService._location_to_dict(location)
 
             # Log the update
-            PickupLocationService._log_activity(
+            ActivityLogHandler.log(
                 db=db,
-                action="UPDATE",
+                entity_type=PickupLocationService.ENTITY_TYPE,
                 entity_id=pickup_location_id,
+                action=ActivityLogHandler.ACTION_UPDATE,
                 client_id=client_id,
                 user_id=user_id,
                 user_email=user_email,
@@ -598,15 +601,15 @@ class PickupLocationService:
             db.flush()
 
             # Log the deletion
-            PickupLocationService._log_activity(
+            ActivityLogHandler.log(
                 db=db,
-                action="DELETE",
+                entity_type=PickupLocationService.ENTITY_TYPE,
                 entity_id=pickup_location_id,
+                action=ActivityLogHandler.ACTION_DELETE,
                 client_id=client_id,
                 user_id=user_id,
                 user_email=user_email,
                 old_value=old_value,
-                new_value=None,
                 description=f"Deleted pickup location '{location.location_name}'",
             )
 
