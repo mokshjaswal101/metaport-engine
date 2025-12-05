@@ -325,6 +325,28 @@ class OrderService:
             order_dict["order_value"] = round(order_value, 2)
             order_dict["total_amount"] = round(total_amount, 2)
 
+            # Set COD to collect for COD orders
+            if order_dict.get("payment_mode", "").upper() == "COD":
+                provided_cod_to_collect = order_dict.get("cod_to_collect")
+                if (
+                    provided_cod_to_collect is not None
+                    and float(provided_cod_to_collect) > 0
+                ):
+                    # Validate cod_to_collect doesn't exceed total_amount
+                    if float(provided_cod_to_collect) > order_dict["total_amount"]:
+                        return GenericResponseModel(
+                            status_code=http.HTTPStatus.BAD_REQUEST,
+                            message=f"COD to collect (₹{provided_cod_to_collect}) cannot exceed total amount (₹{order_dict['total_amount']})",
+                            status=False,
+                        )
+                    order_dict["cod_to_collect"] = round(
+                        float(provided_cod_to_collect), 2
+                    )
+                else:
+                    order_dict["cod_to_collect"] = order_dict["total_amount"]
+            else:
+                order_dict["cod_to_collect"] = 0
+
             # Calculate volumetric and applicable weight
             volumetric_weight = round(
                 (order_dict["length"] * order_dict["breadth"] * order_dict["height"])
@@ -525,6 +547,28 @@ class OrderService:
 
             order_dict["order_value"] = round(order_value, 2)
             order_dict["total_amount"] = round(total_amount, 2)
+
+            # Set COD to collect for COD orders
+            if order_dict.get("payment_mode", "").upper() == "COD":
+                provided_cod_to_collect = order_dict.get("cod_to_collect")
+                if (
+                    provided_cod_to_collect is not None
+                    and float(provided_cod_to_collect) > 0
+                ):
+                    # Validate cod_to_collect doesn't exceed total_amount
+                    if float(provided_cod_to_collect) > order_dict["total_amount"]:
+                        return GenericResponseModel(
+                            status_code=http.HTTPStatus.BAD_REQUEST,
+                            message=f"COD to collect (₹{provided_cod_to_collect}) cannot exceed total amount (₹{order_dict['total_amount']})",
+                            status=False,
+                        )
+                    order_dict["cod_to_collect"] = round(
+                        float(provided_cod_to_collect), 2
+                    )
+                else:
+                    order_dict["cod_to_collect"] = order_dict["total_amount"]
+            else:
+                order_dict["cod_to_collect"] = 0
 
             # Fields that should not be updated directly
             exclude_fields = {
