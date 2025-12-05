@@ -2,18 +2,31 @@ from datetime import datetime
 import pytz
 
 
+def convert_to_utc(order_date, original_tz="Asia/Kolkata"):
+    """
+    Convert a datetime to UTC timezone.
+    """
+    # Check if order_date is a string and needs parsing
+    if isinstance(order_date, str):
+        # Parse the date from the string if it's a string
+        order_date = datetime.strptime(order_date, "%Y-%m-%d %H:%M:%S")
+
+    # Set the original timezone if it's naive
+    local_tz = pytz.timezone(original_tz)
+    if order_date.tzinfo is None:
+        order_date_localized = local_tz.localize(order_date)
+    else:
+        order_date_localized = order_date
+
+    # Convert to UTC
+    order_date_utc = order_date_localized.astimezone(pytz.utc)
+
+    return order_date_utc
+
+
 def parse_datetime(datetime_str: str) -> datetime:
     """
     Parses a datetime string in IST to a UTC datetime object, supporting multiple formats.
-
-    Args:
-        datetime_str (str): The datetime string to parse.
-
-    Returns:
-        datetime: The parsed and converted UTC datetime object.
-
-    Raises:
-        ValueError: If the datetime string does not match any known format.
     """
     date_formats = [
         "%d-%m-%Y %H:%M:%S",  # With seconds

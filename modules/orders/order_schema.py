@@ -21,9 +21,8 @@ class PaymentMode(str, Enum):
     PREPAID = "prepaid"
 
 
-# ============================================
 # REGEX PATTERNS
-# ============================================
+
 
 # Name: letters, numbers, spaces, period, apostrophe, hyphen
 NAME_REGEX = re.compile(r"^[a-zA-Z0-9\s.'\-]+$")
@@ -50,9 +49,8 @@ ORDER_ID_REGEX = re.compile(r"^[a-zA-Z0-9_\-\.]+$")
 EWAY_BILL_REGEX = re.compile(r"^\d{12}$")
 
 
-# ============================================
 # CONSTANTS
-# ============================================
+
 
 WEIGHT_MIN = 0.1  # kg
 WEIGHT_MAX = 100  # kg
@@ -62,9 +60,7 @@ VOLUMETRIC_WEIGHT_MAX = 100  # kg
 EWAY_BILL_THRESHOLD = 50000  # INR
 
 
-# ============================================
 # HELPER FUNCTIONS
-# ============================================
 
 
 def calculate_volumetric_weight(length: float, breadth: float, height: float) -> float:
@@ -72,9 +68,7 @@ def calculate_volumetric_weight(length: float, breadth: float, height: float) ->
     return round((length * breadth * height) / 5000, 3)
 
 
-# ============================================
 # COMPONENT SCHEMAS
-# ============================================
 
 
 class OrderDetailsInput(BaseModel):
@@ -191,9 +185,7 @@ class ConsigneeDetailsInput(BaseModel):
         if not v:
             raise ValueError("Phone number is required")
         if not PHONE_REGEX.match(v):
-            raise ValueError(
-                "Phone number must be 10 digits starting with 6, 7, 8, or 9"
-            )
+            raise ValueError("Inavlid Phone number")
         return v
 
     @field_validator("consignee_alternate_phone", mode="before")
@@ -203,9 +195,7 @@ class ConsigneeDetailsInput(BaseModel):
             return None
         v = clean_phone(v)
         if v and not PHONE_REGEX.match(v):
-            raise ValueError(
-                "Alternate phone must be 10 digits starting with 6, 7, 8, or 9"
-            )
+            raise ValueError("Invalid Phone number")
         return v
 
     @field_validator("consignee_email")
@@ -375,6 +365,7 @@ class PaymentDetailsInput(BaseModel):
     """Payment and charges"""
 
     payment_mode: str
+    cod_to_collect: Optional[float] = 0
     shipping_charges: Optional[float] = 0
     cod_charges: Optional[float] = 0
     discount: Optional[float] = 0
@@ -406,6 +397,7 @@ class PaymentDetailsInput(BaseModel):
         "gift_wrap_charges",
         "other_charges",
         "tax_amount",
+        "cod_to_collect",
     )
     @classmethod
     def validate_positive_charge(cls, v):
@@ -517,9 +509,7 @@ class ProductInput(BaseModel):
         return clean_text(v, 50)
 
 
-# ============================================
 # REQUEST SCHEMAS
-# ============================================
 
 
 class Order_create_request_model(
@@ -571,9 +561,7 @@ class Order_create_request_model(
         return self
 
 
-# ============================================
 # RESPONSE SCHEMAS
-# ============================================
 
 
 class ProductResponse(BaseModel):
@@ -783,9 +771,7 @@ class Single_Order_Response_Model(Order_Response_Model):
         from_attributes = True
 
 
-# ============================================
 # FILTER & ACTION SCHEMAS
-# ============================================
 
 
 class Order_filters(BaseModel):
@@ -926,9 +912,7 @@ class BulkImportResponseModel(BaseModel):
     failed_orders: int
 
 
-# ============================================
 # COD REMITTANCE SCHEMAS
-# ============================================
 
 
 class COD_Remitance_Model(DBBaseModel):
@@ -950,10 +934,8 @@ class COD_Remitance_Model(DBBaseModel):
     client_id: int
 
 
-# ============================================
 # LEGACY COMPATIBILITY - Order_Model
 # Required by: shipping partners, notifications, documents, etc.
-# ============================================
 
 
 class Order_Base_Model(BaseModel):
